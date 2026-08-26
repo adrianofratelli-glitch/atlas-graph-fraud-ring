@@ -1,0 +1,102 @@
+{
+  "medido_em": "2026-08-26T23:34:40.325083+00:00",
+  "arestas": 2398814,
+  "runs": 3,
+  "perfis": {
+    "alto": {
+      "grau": 340,
+      "profundidades": {
+        "1": {
+          "nos": 10668,
+          "arestas": 11894,
+          "media_ms": 109.6,
+          "p95_ms": 111.2
+        },
+        "2": {
+          "erro": "limite de 100MB do documento de saída",
+          "codigo": 8442700,
+          "mensagem": "Executor error during aggregate command on namespace: graph_fraud_ring.people :: caused by :: Total size of the output document exceeds 104857600 bytes. Consider using $unwind to split the output.",
+          "ms_ate_falhar": 38231.1
+        },
+        "2_com_poda": {
+          "nos": 51803,
+          "arestas": 77247,
+          "media_ms": 1629.5,
+          "p95_ms": 1629.5
+        }
+      }
+    },
+    "medio": {
+      "grau": 14,
+      "profundidades": {
+        "1": {
+          "nos": 626,
+          "arestas": 642,
+          "media_ms": 12.6,
+          "p95_ms": 12.7
+        },
+        "2": {
+          "nos": 21278,
+          "arestas": 25809,
+          "media_ms": 253.9,
+          "p95_ms": 263.0
+        },
+        "3": {
+          "erro": "limite de 100MB do documento de saída",
+          "codigo": 8442700,
+          "mensagem": "Executor error during aggregate command on namespace: graph_fraud_ring.people :: caused by :: Total size of the output document exceeds 104857600 bytes. Consider using $unwind to split the output.",
+          "ms_ate_falhar": 180003.9
+        },
+        "3_com_poda": {
+          "nos": 17290,
+          "arestas": 20759,
+          "media_ms": 480.8,
+          "p95_ms": 480.8
+        }
+      }
+    },
+    "baixo": {
+      "grau": 12,
+      "profundidades": {
+        "1": {
+          "nos": 363,
+          "arestas": 376,
+          "media_ms": 11.8,
+          "p95_ms": 11.1
+        },
+        "2": {
+          "nos": 13597,
+          "arestas": 15823,
+          "media_ms": 152.5,
+          "p95_ms": 129.3
+        },
+        "3": {
+          "erro": "limite de 100MB do documento de saída",
+          "codigo": 8442700,
+          "mensagem": "Executor error during aggregate command on namespace: graph_fraud_ring.people :: caused by :: Total size of the output document exceeds 104857600 bytes. Consider using $unwind to split the output.",
+          "ms_ate_falhar": 76307.0
+        },
+        "3_com_poda": {
+          "nos": 19275,
+          "arestas": 23197,
+          "media_ms": 365.5,
+          "p95_ms": 365.5
+        }
+      }
+    }
+  },
+  "poda": {
+    "sem poda": {
+      "nos": 10668,
+      "arestas": 11894,
+      "media_ms": 104.2,
+      "p95_ms": 100.4
+    },
+    "com poda": {
+      "nos": 3620,
+      "arestas": 3925,
+      "media_ms": 45.3,
+      "p95_ms": 43.4
+    }
+  }
+}

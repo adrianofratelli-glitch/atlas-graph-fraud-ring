@@ -1,0 +1,32 @@
+{
+  "name": "atlas-graph-fraud-ring-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@leafygreen-ui/badge": "^10.2.4",
+    "@leafygreen-ui/banner": "^10.2.5",
+    "@leafygreen-ui/button": "^25.2.1",
+    "@leafygreen-ui/card": "^13.3.1",
+    "@leafygreen-ui/icon": "^14.9.0",
+    "@leafygreen-ui/leafygreen-provider": "^5.0.4",
+    "@leafygreen-ui/palette": "^5.0.2",
+    "@leafygreen-ui/table": "^15.2.3",
+    "@leafygreen-ui/text-input": "^16.2.3",
+    "@leafygreen-ui/toggle": "^12.1.5",
+    "@leafygreen-ui/typography": "^22.2.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vis-data": "^7.1.9",
+    "vis-network": "^9.1.9"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.1",
+    "vite": "^8.0.12"
+  }
+}

@@ -1,0 +1,149 @@
+/* MongoDB PoV portfolio signature.
+   Keep this file byte-identical across the independent PoV repositories.
+   Domain styling belongs in the app stylesheet; this layer owns shared
+   interaction, accessibility and the segmented "document rail". */
+:root {
+  --pov-bg: #001e2b;
+  --pov-surface: #112733;
+  --pov-card: #1c2d38;
+  --pov-border: #3d4f58;
+  --pov-text: #e8edeb;
+  --pov-text-secondary: #c1c7c6;
+  --pov-muted: #889397;
+  --pov-green: #00ed64;
+  --pov-green-dark: #00684a;
+  --pov-blue: #0498ec;
+  --pov-yellow: #ffc010;
+  --pov-red: #ff6960;
+  --pov-radius-sm: 6px;
+  --pov-radius-md: 12px;
+  --pov-radius-lg: 16px;
+  --pov-motion: 180ms cubic-bezier(.2,.8,.2,1);
+  color-scheme: dark;
+}
+
+[data-pov-shell] {
+  min-height: 100vh;
+  isolation: isolate;
+  accent-color: var(--pov-green);
+}
+
+/* Signature: a BSON/document-inspired rail, repeated across every PoV. */
+[data-pov-shell]::before {
+  content: "";
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: 10000;
+  height: 3px;
+  pointer-events: none;
+  background:
+    linear-gradient(
+      90deg,
+      var(--pov-green) 0 56px,
+      var(--pov-green-dark) 56px 92px,
+      var(--pov-blue) 92px 100px,
+      rgba(0, 237, 100, .18) 100px 34%,
+      transparent 72%
+    );
+}
+
+.pov-skip-link {
+  position: fixed;
+  z-index: 10001;
+  top: 10px;
+  left: 12px;
+  transform: translateY(-160%);
+  padding: 10px 14px;
+  border: 1px solid rgba(0, 237, 100, .5);
+  border-radius: var(--pov-radius-sm);
+  background: var(--pov-card);
+  color: var(--pov-text);
+  font: 600 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-decoration: none;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, .45);
+  transition: transform var(--pov-motion);
+}
+
+.pov-skip-link:focus {
+  transform: translateY(0);
+}
+
+[data-pov-shell] :where(button, a, input, select, textarea, summary) {
+  -webkit-tap-highlight-color: transparent;
+}
+
+[data-pov-shell] :where(button, [role="button"], a, input, select, textarea, summary) {
+  transition:
+    color var(--pov-motion),
+    background-color var(--pov-motion),
+    border-color var(--pov-motion),
+    opacity var(--pov-motion),
+    transform var(--pov-motion);
+}
+
+[data-pov-shell] :where(button, [role="button"], a, input, select, textarea, summary):focus-visible {
+  outline: 2px solid var(--pov-blue) !important;
+  outline-offset: 3px;
+}
+
+[data-pov-shell] :where(input, select, textarea) {
+  min-height: 40px;
+}
+
+[data-pov-shell] :where(button, [role="button"]):disabled {
+  cursor: not-allowed;
+  filter: saturate(.7);
+}
+
+[data-pov-shell] :where(code, pre, kbd, samp, .mono) {
+  font-variant-ligatures: none;
+  font-variant-numeric: tabular-nums;
+}
+
+[data-pov-shell] :where(table) {
+  font-variant-numeric: tabular-nums;
+}
+
+[data-pov-shell] :where(::selection) {
+  background: rgba(0, 237, 100, .25);
+  color: var(--pov-text);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  [data-pov-shell] :where(button:not(:disabled), [role="button"], summary) {
+    cursor: pointer;
+  }
+}
+
+@media (pointer: coarse) {
+  [data-pov-shell] :where(button, [role="button"], input, select, textarea, summary) {
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 720px) {
+  [data-pov-shell]::before {
+    background:
+      linear-gradient(
+        90deg,
+        var(--pov-green) 0 44px,
+        var(--pov-green-dark) 44px 72px,
+        var(--pov-blue) 72px 78px,
+        rgba(0, 237, 100, .15) 78px 60%,
+        transparent
+      );
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-pov-shell],
+  [data-pov-shell] *,
+  [data-pov-shell] *::before,
+  [data-pov-shell] *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
+
