@@ -41,6 +41,17 @@ class Settings:
     # tela parada por um minuto e meio e o cluster queima CPU para depois falhar.
     # Com teto, vira erro em 15 s e a UI diz o que fazer.
     graph_max_time_ms: int = int(os.getenv("GRAPH_MAX_TIME_MS", 15_000))
+    # --- Números do cliente, para o caso de negócio -------------------------
+    #
+    # Estes NÃO são medições e a tela diz isso. A exposição em reais e a contagem
+    # de operações saem do dado real; quanto tempo uma investigação custa hoje só
+    # o banco sabe, então é entrada do apresentador, não um número inventado por
+    # nós. Deixar um palpite disfarçado de medição contamina a credibilidade de
+    # tudo que foi medido de verdade.
+    analyst_hours_per_case: float = float(os.getenv("ANALYST_HOURS_PER_CASE", 4))
+    analyst_cost_per_hour: float = float(os.getenv("ANALYST_COST_PER_HOUR", 120))
+    currency: str = os.getenv("CURRENCY", "R$")
+
     port: int = int(os.getenv("BACKEND_PORT", 8350))
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
 

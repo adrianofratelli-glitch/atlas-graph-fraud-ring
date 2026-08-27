@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, field_validator
 from pymongo.errors import PyMongoError
 
 from app.config import get_settings
-from app.db import graph, investigation, search
+from app.db import exposure, graph, investigation, search
 from app.db.client import get_db
 from app.services import demo
 from app.services.alerts import hub, sse_stream
@@ -66,6 +66,10 @@ class SimilarReasonsIn(BaseModel):
         if not v.strip():
             raise ValueError("`text` cannot be whitespace only")
         return v
+
+
+class ExposureIn(BaseModel):
+    person_ids: list[str] = Field(min_length=1, max_length=2000)
 
 
 class SearchPeopleIn(BaseModel):
@@ -284,6 +288,20 @@ def close(case_id: str):
     result = investigation.close_case(case_id)
     if not result.get("ok"):
         raise HTTPException(404, result.get("error"))
+    return result
+
+
+@app.post("/api/exposure")
+def network_exposure(payload: ExposureIn):
+    """Quanto dinheiro passou pela rede que está na tela.
+
+    Endpoint separado de propósito, chamado depois que o grafo já desenhou: a
+    agregação sobre `transactions` custa uma ida a mais ao cluster, e pendurá-la
+    na expansão atrasaria o passo que o apresentador está mostrando ao vivo.
+    """
+    result = exposure.network_exposure(payload.person_ids)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error", "falha ao calcular exposição"))
     return result
 
 

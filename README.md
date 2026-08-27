@@ -92,7 +92,22 @@ thing, across accounts that supposedly do not know each other.
 
 ![Semantic search returning several phrasings of the same excuse](docs/screenshots/05-similaridade-semantica.png)
 
-### 6. Acting on the whole network, and watching the next one arrive
+### 6. What the network is worth
+
+The **At risk** tile is the volume those accounts actually moved, summed from
+`transactions` on the live cluster. It is the number that turns "thirty nodes" into
+"why should I care?", and it is measured, not projected.
+
+Opening **What this case is worth** splits it into what we measured (volume,
+operations, accounts, window) and what the bank supplies (hours and cost per case,
+set in `.env`). We deliberately do not estimate loss avoided: converting exposure
+into realised loss needs a rate that varies by product and institution, and
+guessing it would undo the credibility of every measured number here. The framing
+is in [docs/business-case.md](docs/business-case.md).
+
+![Case card showing the measured exposure of the network and the bank's own cost per case](docs/screenshots/06-valor-do-caso.png)
+
+### 7. Acting on the whole network, and watching the next one arrive
 
 Flagging the ring updates accounts, people and the audit record in a single
 transaction: either the whole network goes under investigation or none of it does.
@@ -103,7 +118,7 @@ Right after, a new transaction touches the flagged network and the alert appears
 on its own. Close the case and inject the same transaction again: **no alert** —
 and the screen says so, because silence must not look like a broken demo.
 
-![Investigation case opened and the alert for the following transaction](docs/screenshots/06-acid-e-alerta.png)
+![Investigation case opened and the alert for the following transaction](docs/screenshots/07-acid-e-alerta.png)
 
 ## What it takes to run
 
@@ -214,7 +229,7 @@ in
 | `backend/` | the FastAPI API; every query lives in `app/db/` |
 | `frontend/` | the React interface |
 | `tests/` | resilience, scale and index tuning |
-| `docs/` | technical briefing, architecture decision records and the demo script |
+| `docs/` | technical briefing, architecture decision records, demo script and business case |
 
 To understand how it was built, start with
 [implementation_plan.md](implementation_plan.md).

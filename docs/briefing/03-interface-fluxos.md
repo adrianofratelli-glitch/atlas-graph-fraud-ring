@@ -126,6 +126,42 @@ The Alerts tab renders both kinds of event: the red `ring_touch` alert and the g
 `checked` line saying how many accounts the listener looked at and in how many
 milliseconds. Silence had to have a shape.
 
+## The business number, without a new screen
+
+Two additions, both inside surfaces that already existed:
+
+- an **At risk** tile in the metrics bar, showing the volume the network on screen
+  moved. It appears only when the expansion contains ring members;
+- a **What this case is worth** block inside the case card, collapsed by default.
+
+`POST /api/exposure` is a separate call made *after* the graph has drawn. The
+aggregation over `transactions` costs about a second, and hanging it on the
+traversal would slow down the exact step being demonstrated live.
+
+The measured half and the assumed half are visually separated, and the panel labels
+them. The volume, operations and window come from the data; hours and cost per case
+come from `.env` and are the bank's numbers. Loss avoided is deliberately not
+estimated — see [`docs/business-case.md`](../business-case.md).
+
+## Keeping the rail free of scroll
+
+The case card grew three collapsible blocks — what the transaction changed, what
+the case is worth, what the bank must now do — and with all of them expanded the
+control rail reached 1,687 px against a 922 px viewport. The presenter would have
+had to scroll to reach *Close case*.
+
+Two changes fixed it, and both are measured against the rail's own scroll height:
+
+- the card shows only the headline (accounts blocked, people, commit time,
+  guarantee) in a two-column grid; everything else is behind a summary;
+- the **Flag** button disappears while a case is open. The backend refuses a second
+  case over the same nodes anyway, so the button was occupying rail height to do
+  nothing.
+
+Measured after: 922 px with a case open and everything collapsed — exactly the
+viewport, no scroll. Expanding a block scrolls that rail, which is deliberate: the
+presenter asked for it.
+
 ## Nothing but an alert steals the tab
 
 Every SSE event used to call `setTab('alerts')`. During a large `update_many` on

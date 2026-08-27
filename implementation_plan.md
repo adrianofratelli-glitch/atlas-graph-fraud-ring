@@ -36,6 +36,7 @@ Positioning documents, outside the build briefing:
 | [`COMPETITIVE.md`](COMPETITIVE.md) | MongoDB × Neo4j × Neptune, and the qualifying questions |
 | [`queries/benchmarks.md`](queries/benchmarks.md) | numbers measured on this cluster, not estimated |
 | [`docs/demo-script.md`](docs/demo-script.md) | 15-minute script and pre-demo checklist |
+| [`docs/business-case.md`](docs/business-case.md) | turning the demo into a number, and what we refuse to estimate |
 | [`docs/adr/`](docs/adr/) | recorded architecture decisions |
 | [`tests/`](tests/) | hostile suite, scale test and index tuning |
 

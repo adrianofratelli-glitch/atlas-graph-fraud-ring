@@ -60,6 +60,11 @@ from the execution, not from `benchmarks.md`.
 At depth 3 the injected network closes. Red nodes, thick border. Point at the "in
 ring" metric — that is ground truth matching.
 
+Then point at **At risk**. That tile is the volume those accounts actually moved,
+summed from `transactions` on the live cluster — not a projection. It is the
+answer to "why should I care about these thirty accounts?", and it is the first
+number in the demo that a non-technical person in the room can act on.
+
 ### 5. Which link actually holds the ring together (2 min)
 This is where the checkboxes earn their place. Still at depth 3, uncheck one type
 at a time:
@@ -153,6 +158,23 @@ a dashed border** — the action becomes visible where the investigation happens
 
 Explain why an intermediate state — half the network blocked, incoherent audit — is
 worse than not having acted.
+
+If the audience owns a budget, open **"What this case is worth"**. It splits into
+two blocks, and the split is the point:
+
+- **Measured** — the volume, operations, accounts and window, straight from
+  `transactions`;
+- **Your number** — hours per case and cost per hour, which come from `.env` and
+  are the bank's own figures, not ours. The panel says so on screen.
+
+The arithmetic is one line: today a case is opened per account, here one case
+covers the ring the traversal found. Say plainly that we do **not** estimate loss
+avoided — converting exposure into realised loss needs a rate that varies by
+product and institution, and guessing it would undo the credibility of every
+measured number in the demo. That refusal lands better than a big invented figure.
+
+Full framing, plus the discovery questions that fill the two inputs, is in
+[`docs/business-case.md`](business-case.md).
 
 If the audience is a compliance team, open **"What the bank is now required to do"**
 inside the card. It shows three obligations that come entirely from the audit record

@@ -17,6 +17,11 @@ const TABS = [
 
 const fmt = (n) => (n == null ? '—' : n.toLocaleString('en-US'))
 
+// Valor compacto para a barra de métricas: numa tela de projetor, "522k" é lido
+// de relance e "521,684.37" não é. O número exato fica no cartão do caso.
+const compact = (n) =>
+  n == null ? '—' : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : Math.round(n)
+
 // Paráfrases que NÃO existem no corpus. Se a frase da consulta estivesse lá
 // literalmente, o primeiro resultado seria ela mesma e a busca não provaria nada.
 // Uma por escopo, porque a rede e a base falam de coisas diferentes: o anel
@@ -46,6 +51,7 @@ export default function App() {
   const [caseDetail, setCaseDetail] = useState(null)
   const [coaf, setCoaf] = useState(null)
   const [lastSim, setLastSim] = useState(null)
+  const [exposure, setExposure] = useState(null)
 
   useEffect(() => {
     api.health().then(setHealth).catch(() => setHealth({ status: 'offline' }))
@@ -101,6 +107,31 @@ export default function App() {
     if (subject) expand(depth, subject)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subject, depth, types, prune])
+
+  // Exposição financeira da rede na tela: quanto dinheiro passou por aquelas
+  // contas. É o número que responde "por que eu deveria me importar com essas 30
+  // contas?", e é medido — sai de `transactions`, não de projeção.
+  //
+  // Buscada depois da expansão, nunca junto: a agregação custa ~1 s e pendurá-la
+  // no traversal atrasaria justamente o passo que está sendo mostrado ao vivo.
+  useEffect(() => {
+    const ids = (net?.nodes ?? []).map((n) => n.id)
+    // `net?.stats` e não `stats`: a constante é declarada mais abaixo, e usá-la
+    // aqui cairia na zona morta temporal do `const` a cada render.
+    if (!ids.length || !net?.stats?.ring_nodes) {
+      setExposure(null)
+      return
+    }
+    let vivo = true
+    api
+      .exposure(ids)
+      .then((e) => vivo && setExposure(e))
+      .catch(() => vivo && setExposure(null))
+    return () => {
+      vivo = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [net])
 
   // Recupera um caso já aberto no banco quando a tela recarrega.
   //
@@ -356,9 +387,14 @@ export default function App() {
 
           <section className="block block-action">
             <h2>Analyst action</h2>
-            <button className="btn btn-primary btn-block" onClick={doFlag} disabled={busy || !ringNodes.length}>
-              Flag {ringNodes.length || 0} nodes for investigation
-            </button>
+            {/* Com um caso aberto o backend recusa abrir outro sobre os mesmos
+                nós, então o botão só ocuparia espaço no trilho fazendo nada. Some
+                enquanto o caso existe e volta quando ele é encerrado. */}
+            {!caseInfo && (
+              <button className="btn btn-primary btn-block" onClick={doFlag} disabled={busy || !ringNodes.length}>
+                Flag {ringNodes.length || 0} nodes for investigation
+              </button>
+            )}
             {!caseInfo && ringNodes.length > 0 && depth < 3 && (
               <p className="muted small">
                 You are at hop {depth}. The ring usually closes at 3 — flagging now blocks only
@@ -366,7 +402,9 @@ export default function App() {
               </p>
             )}
 
-            {caseInfo && <CaseCard info={caseInfo} detail={caseDetail} coaf={coaf} onCoaf={doCoaf} />}
+            {caseInfo && (
+              <CaseCard info={caseInfo} detail={caseDetail} coaf={coaf} onCoaf={doCoaf} exposure={exposure} />
+            )}
 
             <button className="btn btn-ghost btn-block" disabled={busy || !net?.nodes?.length} onClick={doSimulate}>
               Inject transaction into the network
@@ -388,9 +426,7 @@ export default function App() {
               </button>
             </div>
             <p className="muted small">
-              Closing the case unblocks the accounts and lets you inject the same transaction
-              against a free network — the A/B that shows the change stream reading state rather
-              than firing on its own.
+              Close the case, inject again, and no alert fires. That is the A/B.
             </p>
           </section>
         </aside>
@@ -402,6 +438,11 @@ export default function App() {
             <Metric k="In ring" v={fmt(stats?.ring_nodes)} tone={stats?.ring_nodes ? 'bad' : undefined} />
             {stats?.flagged_nodes > 0 && (
               <Metric k="Blocked" v={fmt(stats.flagged_nodes)} tone="warn" />
+            )}
+            {/* Medido, não projetado: o volume que passou por estas contas. É o
+                que transforma "30 nós" em "por que isto importa". */}
+            {exposure?.volume > 0 && (
+              <Metric k="At risk" v={`${exposure.currency} ${compact(exposure.volume)}`} tone="bad" />
             )}
             <Metric k="Time" v={stats ? `${stats.elapsed_ms} ms` : '—'} tone={metricTone(stats?.elapsed_ms)} />
             <Metric k="Hop" v={net?.depth ?? '—'} />
@@ -657,7 +698,7 @@ export default function App() {
  * O relatório de compliance fica num `<details>` fechado: ele é a resposta para
  * "e o que o banco faz com isso?", que nem toda plateia pergunta.
  */
-function CaseCard({ info, detail, coaf, onCoaf }) {
+function CaseCard({ info, detail, coaf, onCoaf, exposure }) {
   const contas = detail?.accounts ?? []
   const bloqueadas = contas.filter((c) => c.status === 'under_investigation').length
   return (
@@ -671,28 +712,84 @@ function CaseCard({ info, detail, coaf, onCoaf }) {
         <div><dt>Commit</dt><dd>{info.elapsed_ms} ms</dd></div>
         <div><dt>Guarantee</dt><dd>{info.read_concern} / {info.write_concern}</dd></div>
       </dl>
-      <p className="muted small">
-        All three writes — <code>accounts.status</code>, <code>people.risk_flags</code> and the
-        audit document — committed together. Half the network blocked with no coherent audit
-        record is worse than not having acted at all.
-      </p>
-
+      {/* Três blocos recolhidos, um por pergunta que a plateia pode fazer.
+          Abertos de uma vez o trilho passa de 1.200 px e o apresentador precisa
+          rolar para achar "Close case" — que é justamente o que não pode. */}
       {contas.length > 0 && (
-        <div className="case-diff">
-          <span className="case-diff-h">before → after</span>
-          {contas.slice(0, 4).map((c) => (
-            // Uma pessoa pode ter mais de uma conta, e as linhas são por CONTA.
-            // Sem o tipo, o mesmo nome aparecia duas vezes e parecia duplicata.
-            <p key={c._id} className="case-diff-row">
-              <span className="grow">
-                {c.person_name ?? c._id.slice(0, 14)}
-                {c.account_type && <em>{c.account_type}</em>}
-              </span>
-              <s>active</s> <b>blocked</b>
+        <details className="case-compliance">
+          <summary>What the transaction changed</summary>
+          <div className="case-diff">
+            {contas.slice(0, 4).map((c) => (
+              // Uma pessoa pode ter mais de uma conta, e as linhas são por CONTA.
+              // Sem o tipo, o mesmo nome aparecia duas vezes e parecia duplicata.
+              <p key={c._id} className="case-diff-row">
+                <span className="grow">
+                  {c.person_name ?? c._id.slice(0, 14)}
+                  {c.account_type && <em>{c.account_type}</em>}
+                </span>
+                <s>active</s> <b>blocked</b>
+              </p>
+            ))}
+            {contas.length > 4 && (
+              <p className="muted small">and {fmt(contas.length - 4)} more accounts</p>
+            )}
+            <p className="muted small">
+              All three writes — <code>accounts.status</code>, <code>people.risk_flags</code> and
+              the audit document — committed together. Half the network blocked with no coherent
+              audit record is worse than not having acted at all.
             </p>
-          ))}
-          {contas.length > 4 && <p className="muted small">and {fmt(contas.length - 4)} more accounts</p>}
-        </div>
+          </div>
+        </details>
+      )}
+
+      {/* O caso em dinheiro. Fechado por padrão: nem toda plateia pergunta, e
+          uma tela cheia de número que ninguém pediu é ruído. */}
+      {exposure?.volume > 0 && (
+        <details className="case-compliance">
+          <summary>What this case is worth</summary>
+          <div className="rows">
+            <div className="row compliance">
+              <span className="grow">
+                <strong>Measured — what moved through this network</strong>
+                <em>
+                  {exposure.currency} {fmt(Math.round(exposure.volume))} across{' '}
+                  {fmt(exposure.operations)} operations
+                </em>
+                <em>
+                  {fmt(exposure.accounts)} accounts
+                  {exposure.window_days ? ` · ${fmt(exposure.window_days)} day window` : ''} · avg{' '}
+                  {exposure.currency} {fmt(Math.round(exposure.avg_ticket))}
+                </em>
+                <em>from `transactions`, not a projection</em>
+              </span>
+            </div>
+            <div className="row compliance">
+              <span className="grow">
+                <strong>Your number — what an investigation costs today</strong>
+                <em>
+                  {exposure.assumption.hours_per_case} h × {exposure.currency}{' '}
+                  {fmt(exposure.assumption.cost_per_hour)}/h = {exposure.currency}{' '}
+                  {fmt(exposure.assumption.cost_per_case)} per case
+                </em>
+                <em>
+                  one case per account today: {fmt(exposure.assumption.manual_cases)} ×{' '}
+                  {exposure.currency} {fmt(exposure.assumption.cost_per_case)} ={' '}
+                  <b>{exposure.currency} {fmt(exposure.assumption.manual_cost)}</b>
+                </em>
+                <em>
+                  one case for the whole ring here:{' '}
+                  <b>{exposure.currency} {fmt(exposure.assumption.graph_cost)}</b>
+                </em>
+              </span>
+            </div>
+            <p className="muted small">
+              The volume is measured. The hours and the hourly cost are the bank&apos;s own
+              numbers — set them in <code>.env</code>. We deliberately do not estimate loss
+              avoided: turning exposure into loss needs a rate that varies by product and by
+              institution, and guessing it would undo everything else that was measured.
+            </p>
+          </div>
+        </details>
       )}
 
       <details className="case-compliance" onToggle={(e) => e.target.open && !coaf && onCoaf()}>

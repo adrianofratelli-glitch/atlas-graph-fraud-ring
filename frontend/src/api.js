@@ -69,6 +69,10 @@ export const api = {
   closeCase: (caseId) =>
     call(`/api/investigation/close/${encodeURIComponent(caseId)}`, { method: 'POST' }),
   caseDetail: (caseId) => call(`/api/investigation/case/${encodeURIComponent(caseId)}`),
+  // Chamada à parte, depois que o grafo desenhou: a agregação sobre transactions
+  // custa uma ida a mais ao cluster e não pode atrasar a expansão ao vivo.
+  exposure: (personIds) =>
+    call('/api/exposure', { method: 'POST', body: JSON.stringify({ person_ids: personIds }) }),
   coaf: (caseId) => call(`/api/investigation/coaf/${encodeURIComponent(caseId)}`),
   reset: () => call('/api/demo/reset', { method: 'POST' }),
 }
