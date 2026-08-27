@@ -1,62 +1,77 @@
-# Como este projeto foi construído
+# How this project was built
 
-Capa do briefing de construção. Os três arquivos em `docs/briefing/` guardam
-arquitetura, modelagem e interface; este arquivo diz o que o projeto prova, o que ela
-não prova, e em que ordem foi construída.
+Cover page for the build briefing. The three files in `docs/briefing/` hold
+architecture, modelling and interface; this file says what the project proves, what
+it does not, and in what order it was built.
 
-## O que ele demonstra
+## What it demonstrates
 
-Que traversal multi-hop, entity resolution difusa, similaridade semântica,
-marcação transacional e alerta em tempo real cabem **na mesma plataforma que já
-guarda o dado operacional** — sem um banco de grafo ao lado e sem pipeline de
-sincronização entre dois sistemas.
+That multi-hop traversal, fuzzy entity resolution, semantic similarity,
+transactional flagging and real-time alerting all fit **on the same platform that
+already holds the operational data** — with no graph database alongside it and no
+synchronisation pipeline between two systems.
 
-## O que ele não demonstra
+## What it does not demonstrate
 
-Comportamento em bilhões de arestas, algoritmos de grafo pesados rodando
-continuamente (PageRank, Louvain, centralidade) e `$graphLookup` sobre coleção
-shardada. Isso está em `LIMITATIONS.md` e é leitura obrigatória antes de qualquer
-apresentação — a credibilidade da conversa depende de levantar essas limitações
-antes que o arquiteto do cliente as levante.
+Behaviour at billions of edges, heavy graph algorithms running continuously
+(PageRank, Louvain, centrality) and `$graphLookup` over a sharded collection. That
+is in `LIMITATIONS.md`, and it is required reading before any presentation — the
+credibility of the conversation depends on raising those limitations before the
+customer's architect does.
 
-## Índice do briefing
+## Briefing index
 
-| Arquivo | Conteúdo |
+| File | Contents |
 |---|---|
-| [`docs/briefing/01-arquitetura.md`](docs/briefing/01-arquitetura.md) | camadas, invariantes, ordem de construção, como rodar |
-| [`docs/briefing/02-mongodb.md`](docs/briefing/02-mongodb.md) | coleções, índices, pipelines, materialização de arestas, seeds |
-| [`docs/briefing/03-interface-fluxos.md`](docs/briefing/03-interface-fluxos.md) | telas, estados, degradação, roteiro da demo |
+| [`docs/briefing/01-arquitetura.md`](docs/briefing/01-arquitetura.md) | layers, invariants, order of work, how to run |
+| [`docs/briefing/02-mongodb.md`](docs/briefing/02-mongodb.md) | collections, indexes, pipelines, edge materialisation, seeds |
+| [`docs/briefing/03-interface-fluxos.md`](docs/briefing/03-interface-fluxos.md) | frontend, screens, streaming, demo path |
 
-Documentos de posicionamento, fora do briefing de construção:
+Positioning documents, outside the build briefing:
 
-| Arquivo | Conteúdo |
+| File | Contents |
 |---|---|
-| [`README.md`](README.md) | capa pública do repositório |
-| [`LIMITATIONS.md`](LIMITATIONS.md) | onde a tese **não** se aplica |
-| [`COMPETITIVE.md`](COMPETITIVE.md) | MongoDB × Neo4j × Neptune, e as perguntas de qualificação |
-| [`queries/benchmarks.md`](queries/benchmarks.md) | números medidos neste cluster, não estimados |
-| [`docs/demo-script.md`](docs/demo-script.md) | roteiro de 12-15 minutos e checklist pré-demo |
-| [`docs/adr/`](docs/adr/) | decisões de arquitetura registradas |
-| [`tests/`](tests/) | suíte hostil, teste de escala e ajuste de índice |
+| [`README.md`](README.md) | public cover of the repository |
+| [`LIMITATIONS.md`](LIMITATIONS.md) | where the thesis **does not** apply |
+| [`COMPETITIVE.md`](COMPETITIVE.md) | MongoDB × Neo4j × Neptune, and the qualifying questions |
+| [`queries/benchmarks.md`](queries/benchmarks.md) | numbers measured on this cluster, not estimated |
+| [`docs/demo-script.md`](docs/demo-script.md) | 15-minute script and pre-demo checklist |
+| [`docs/adr/`](docs/adr/) | recorded architecture decisions |
+| [`tests/`](tests/) | hostile suite, scale test and index tuning |
 
-## Ordem de construção
+## Order of work
 
-1. **Dados antes de código.** O gerador (`data-generator/`) veio primeiro porque a
-   topologia do dado sintético é o que determina se a demo funciona. Três versões
-   da topologia foram descartadas por medição, não por opinião — ver
+1. **Data before code.** The generator (`data-generator/`) came first because the
+   topology of the synthetic data is what determines whether the demo works. Three
+   versions of the topology were discarded by measurement, not by opinion — see
    `docs/adr/0001-topologia-do-dado-sintetico.md`.
-2. **Índices e materialização de arestas** (`schema/`, `materialize_connections.py`).
-3. **Queries em `mongosh`** (`queries/`), legíveis sem subir nada.
-4. **Backend** (`backend/`), com a camada de acesso isolada em `app/db/`.
-5. **Frontend** (`frontend/`), seguindo o conjunto de tokens visuais compartilhado.
-6. **Benchmarks medidos** (`queries/bench.py`) e preenchimento de
-   `benchmarks.md` e das tabelas do `LIMITATIONS.md`.
-7. **Tentativa de quebrar** (`tests/test_resilience.py`), que achou três bugs.
-8. **Medição de escala** (`tests/scale_graph.py`), que revelou o teto de 100 MB do
-   `$graphLookup` e mostrou que a poda é o que torna o traversal profundo
-   possível.
+2. **Indexes and edge materialisation** (`schema/`, `materialize_connections.py`).
+3. **Queries in `mongosh`** (`queries/`), readable without starting anything.
+4. **Backend** (`backend/`), with the data-access layer isolated in `app/db/`.
+5. **Frontend** (`frontend/`), following the shared visual token set.
+6. **Measured benchmarks** (`queries/bench.py`), filling in `benchmarks.md` and the
+   tables in `LIMITATIONS.md`.
+7. **Trying to break it** (`tests/test_resilience.py`), which found three bugs.
+8. **Scale measurement** (`tests/scale_graph.py`), which revealed the 100 MB
+   `$graphLookup` ceiling and showed that pruning is what makes deep traversal
+   possible.
 
-## Estado
+## Corrections that changed the model
 
-Construída e executada contra um cluster Atlas M20. A API sobe na porta 8350 e a
-interface na 5350.
+Two of them are worth knowing before reading the code, because both replaced
+something that looked right and was not:
+
+- **The PIX key edge.** The first model linked two people by the *same* key. Brazil's
+  DICT directory guarantees one key per transactional account, so that state cannot
+  exist. The edge is now the shared **destination** key — the collection account at
+  the end of the mule funnel. See `docs/briefing/02-mongodb.md`.
+- **The funnel topology.** Spreading the funnel across fixed collectors turned each
+  key's payers into a clique and collapsed the ring's diameter; entering from any
+  node brought 22 of 30 members at the first hop. Paying the branch parent makes
+  the payers siblings, and the reveal by depth (7 → 16 → 31) survives.
+
+## State
+
+Built and executed against a real Atlas M20 cluster. The API listens on port 8350
+and the interface on 5350. Public-facing documentation and the interface are in
+English; code comments are in Portuguese.

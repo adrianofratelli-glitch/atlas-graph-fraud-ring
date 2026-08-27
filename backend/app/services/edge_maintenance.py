@@ -50,6 +50,19 @@ def maintain(change: dict[str, Any]) -> dict[str, Any] | None:
     doc = change.get("fullDocument")
     if not doc:
         return None
+
+    # Só `insert` — e `update` que tenha mexido nos campos que formam a aresta.
+    #
+    # Sem esta guarda, qualquer escrita em `transactions` reabre a materialização.
+    # Aconteceu de verdade: o backfill de `reason_embedding` fez um `update_many`
+    # por texto, e cada um disparou manutenção de aresta e um evento no SSE — a
+    # tela do cliente virou uma cascata de "aresta criada ao vivo" durante uma
+    # operação que não tocou dispositivo nem conta nenhuma.
+    if change.get("operationType") != "insert":
+        alterados = set((change.get("updateDescription") or {}).get("updatedFields") or {})
+        if not alterados & {"device_id", "from_account", "to_account"}:
+            return None
+
     device = doc.get("device_id")
     origem = doc.get("from_account")
     if not device or not origem:

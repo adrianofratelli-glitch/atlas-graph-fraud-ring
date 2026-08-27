@@ -1,139 +1,241 @@
-# Roteiro da apresentação
+# Presentation script
 
-## Antes de começar
+## Before you start
 
-1. `curl -s localhost:8350/health | jq` retorna `"status": "ok"`. Ele valida, de
-   uma vez: conexão com o Atlas, contagem das coleções, status dos índices de
-   Search/Vector e a latência de um `$graphLookup` de referência.
-2. Se `status` vier `degraded`, o campo `checks` diz exatamente o quê. Índice em
-   `BUILDING` não é bloqueio: o traversal funciona, só corte os passos 6 e 7.
-3. `POST /api/demo/reset` para garantir que nada ficou marcado de uma apresentação
-   anterior. Ele também remove as arestas criadas ao vivo no passo 10, então o
-   "antes" daquele passo volta a ser verdade.
-4. Abrir a UI e conferir que uma conta da **população limpa** renderiza um grafo
-   pequeno. Começar a demo já com o resultado na tela mata o passo 2.
-5. Anotar um `ring_id` do seletor. Se algo falhar ao vivo, `mongosh` com
-   `queries/01_graphlookup_explicit_edges.js` mostra os mesmos números.
-6. Testar os passos 8 e 9 uma vez antes: marcar a rede, injetar a transação, ver o
-   alerta. Depois `reset`.
-7. A primeira chamada de `/api/entry-points` leva cerca de um segundo e as
-   seguintes são instantâneas, porque o resultado fica em cache. Abrir a tela uma
-   vez antes de começar tira esse segundo do caminho.
+1. `curl -s localhost:8350/health | jq` returns `"status": "ok"`. It validates, in
+   one shot: the Atlas connection, the collection counts, the status of the
+   Search/Vector indexes and the latency of a reference `$graphLookup`.
+2. If `status` comes back `degraded`, the `checks` field says exactly what. An
+   index in `BUILDING` is not a blocker: the traversal works, just cut steps 6
+   and 7.
+3. `POST /api/demo/reset` to make sure nothing is left flagged from a previous
+   session. It also removes edges created live in step 10, so the "before" of that
+   step is true again.
+4. Open the UI and confirm that an account from the **clean population** renders a
+   small graph. Starting the demo with the result already on screen kills step 2.
+5. Note a `ring_id` from the selector. If something fails live, `mongosh` with
+   `queries/01_graphlookup_explicit_edges.js` shows the same numbers.
+6. Test steps 8 and 9 once beforehand: flag the network, inject the transaction,
+   see the alert. Then `reset`.
+7. The first call to `/api/entry-points` takes about a second and the rest are
+   instant, because the result is cached. Opening the screen once beforehand takes
+   that second off the critical path.
+8. If you have just run a large batch write against `transactions` (a data
+   regeneration, an embedding backfill), **restart the backend**. The change stream
+   listener resumes from its stored token and spends time draining the oplog; new
+   events only appear once it catches up.
 
-## Roteiro (≈15 minutos)
+## Script (~15 minutes)
 
-### 1. Abertura — o problema (2 min)
-Selecione uma conta da população limpa. Grafo pequeno, sem nada vermelho.
-Pergunte: *"com os dados que vocês têm hoje, o que diria sobre essa conta?"*
+### 1. Opening — the problem (2 min)
+Select an account from the clean population. Small graph, nothing red. Ask: *"with
+the data you have today, what would you say about this account?"*
 
-### 2. A pergunta que muda tudo (1 min)
-*"E se essa conta dividisse dispositivo, endereço e chave PIX com outras vinte que
-também parecem normais isoladamente?"* Troque para a conta sob suspeita,
-profundidade 1. Ainda parece pouco.
+### 2. The question that changes everything (1 min)
+*"And what if this account operated from the same device, at the same address, and
+paid into the same PIX key as twenty others that also look normal in isolation?"*
+Switch to the account under suspicion, depth 1. It still looks like very little.
 
-### 3. Rodar o traversal ao vivo (3 min)
-Profundidade 2, depois 3. Narre o que está acontecendo: **uma** query de
-agregação, sem sair do MongoDB, sem sincronizar com outro sistema. O tempo na tela
-vem da execução, não de `benchmarks.md`.
+Two points of wording, because the audience is a bank:
 
-### 4. A rede completa (2 min)
-Na profundidade 3 a rede injetada fecha. Nós vermelhos, borda grossa. Aponte a
-métrica "nós em rede" — é o ground truth batendo.
+- say **device fingerprint**, not "they share a phone". "Sharing a phone" sounds
+  like a married couple and weakens the case; a repeated fingerprint across
+  unrelated national IDs is a mule farm, which is what anti-fraud teams hunt.
+- the PIX key is the **destination** key. Two accounts holding the same key does
+  not exist: DICT guarantees one key per account. If you say "the same PIX key",
+  the customer's architect takes the demo apart — and they would be right. The link
+  is that they pay into the same key.
 
-### 5. Onde começa a doer, e é você quem levanta (2 min)
-Suba para 4, 5 e 6. **O grafo não cresce**: satura nos 30 membros. Diga isso em voz
-alta, porque é o contrário do que se espera ouvir numa demonstração. A rede é um
-componente fechado, e profundidade extra não alcança mais ninguém.
+Click a node in the ring to **pin** it: the panel stops following the mouse and you
+can read its accounts, how many there are and when they were opened. Accounts under
+different national IDs opened in the same window, on the same device, is evidence
+that needs no narration.
 
-Aí mostre onde o custo mora de verdade. Deixe os números anotados, de
-`queries/benchmarks.md`, seção Escala. Num grafo de 2,4 milhões de arestas:
+### 3. Run the traversal live (3 min)
+Depth 2, then 3. Narrate what is happening: **one** aggregation query, without
+leaving MongoDB, without synchronising to another system. The time on screen comes
+from the execution, not from `benchmarks.md`.
 
-- dois saltos alcançam 21 mil nós em 254 ms;
-- três saltos, sem poda, **não terminam**: estouram o limite de 100 MB que o
-  `$graphLookup` tem para montar o resultado, depois de moer entre 40 e 180
-  segundos;
-- os mesmos três saltos, com poda, terminam em **1 segundo**.
+### 4. The complete network (2 min)
+At depth 3 the injected network closes. Red nodes, thick border. Point at the "in
+ring" metric — that is ground truth matching.
 
-Esse par é o argumento inteiro. A poda não é um filtro de conveniência, é o que
-torna a consulta possível — e ela funciona porque acontece durante o traversal,
-antes de o resultado crescer. Um filtro depois do estágio não salvaria nada.
+### 5. Which link actually holds the ring together (2 min)
+This is where the checkboxes earn their place. Still at depth 3, uncheck one type
+at a time:
 
-Ligue e desligue o toggle **Podar hubs** enquanto fala. Na rede pequena da demo a
-diferença é de milissegundos, porque a materialização já descartou os hubs:
-`materialize_connections.py --report-only` mostra os 3 endereços (8.618 pessoas) e
-os 5 dispositivos (35.251 contas) que ficaram de fora. Diga isso também. Mostrar
-onde a otimização **não** faz diferença é o que dá crédito ao caso em que ela faz.
+| Edges enabled | Nodes reached |
+|---|---|
+| all three | 31 |
+| without destination PIX key | 31 |
+| without address | 30 |
+| **without device** | **3** |
 
-### 6. Entity resolution difusa (2 min)
-O painel de Atlas Search já mostra qual nome do dataset está grafado errado.
-Busque por ele: o registro real da rede aparece no topo. Um `$graphLookup` por
-igualdade exata nunca faria essa ligação — e não foi preciso um segundo motor de
-busca.
+The device fingerprint is what holds this ring together. Address and destination
+key are reinforcement. That is a hypothesis being tested live, in front of the
+customer, without anyone writing a query — and it is the moment the graph stops
+being a picture and becomes an instrument.
 
-### 7. Similaridade semântica (2 min, opcional)
-Vector Search sobre `reason_text`. Corte este passo primeiro se o tempo apertar.
+### 6. Where it starts to hurt, and you are the one raising it (2 min)
+Go up to 4, 5 and 6. **The graph does not grow**: it saturates at the ring's
+members. Say that out loud, because it is the opposite of what people expect to
+hear in a demo. The ring is a closed component, and extra depth reaches nobody
+else.
 
-### 8. Ação — marcar a rede (2 min)
-**Marcar N nós sob investigação.** Uma transação ACID atualiza contas, pessoas e
-o registro de auditoria juntos. Mostre `readConcern: snapshot` e
-`writeConcern: majority` na tela e explique por que um estado intermediário —
-metade das contas bloqueada, auditoria incoerente — é pior do que não ter agido.
+Then show where the cost actually lives. Keep the numbers from
+`queries/benchmarks.md`, section Scale, to hand. On a graph of 2.4 million edges:
 
-### 9. Tempo real (2 min)
-**Injetar transação na rede.** O change stream dispara e o alerta aparece com a
-latência da verificação. Nenhum polling, nenhum job agendado.
+- two hops reach 21,000 nodes in 254 ms;
+- three hops, without pruning, **do not finish**: they exceed the 100 MB limit
+  `$graphLookup` has for assembling its result, after grinding for 40 to 180
+  seconds;
+- the same three hops, with pruning, finish in **1 second**.
 
-### 10. O grafo se atualiza sozinho (1 min)
-Se alguém perguntar como as arestas ficam frescas em produção — e costumam
-perguntar — chame `POST /api/demo/link-accounts`. Ele insere duas transações que
-fazem duas pessoas sem nenhuma ligação passarem a usar o mesmo dispositivo.
+That pair is the entire argument. Pruning is not a convenience filter, it is what
+makes the query possible — and it works because it happens during the traversal,
+before the result grows. A filter after the stage would save nothing.
 
-Antes: `GET /api/connections/between?a=…&b=…` responde `connected: false`. Uns dois
-segundos depois, `true`, com `source: "change_stream"`. E a expansão seguinte já
-percorre a aresta nova.
+Toggle **Prune hubs** on and off while you talk. On the small demo ring the
+difference is milliseconds, because materialisation already discarded the hubs:
+`materialize_connections.py --report-only` shows the 3 addresses (8,618 people) and
+5 devices (35,251 accounts) that were left out. Say that too. Showing where the
+optimisation makes **no** difference is what earns credit for the case where it
+does.
 
-Diga também o que esse caminho não faz: ele adiciona e atualiza aresta, não poda
-retroativamente nem faz backfill. O padrão correto é os dois, change stream para o
-frescor e batch para consistência. Está em
+### 7. Fuzzy entity resolution (2 min)
+The Atlas Search panel already shows which name in the dataset is misspelled.
+Search for it: the real ring record appears at the top. A `$graphLookup` on exact
+equality would never make that link — and it took no second search engine.
+
+The panel has two scopes, and the difference between them is a good question for
+the audience. Type a common first name, **"Diego"**:
+
+- under **Whole database**, the Diego who is in the network comes first tagged
+  `IN NETWORK`, and below him come the Diegos who have nothing to do with the case,
+  tagged `OUTSIDE`;
+- under **This network only**, one is left.
+
+Say why the default is the whole database: **the case that gives this panel its
+value is precisely a record the graph cannot reach.** The misspelled twin has no
+edge linking her to the network. Always scoping would fix the noise and kill the
+demonstration with it; annotating every result fixes both.
+
+### 8. Semantic similarity (2 min)
+Leave the scope on **This network only** and hit Search. The query is a paraphrase
+that does not exist in the corpus, and the useful answer is not a phrase — it is
+the number at the top: **eight different ways of saying the same thing inside that
+network**, with an average ticket in the thousands.
+
+That is the investigative reading: thirty accounts that do not know each other
+justify transfers of R$ 3,000 with eight variations of the same excuse. Keyword
+search does not group that, because the phrases share no words.
+
+Switch to **Whole database** and compare the ticket: the same "consultancy" reasons
+in the legitimate population are worth R$ 280, not R$ 3,400. The contrast appears
+on its own.
+
+If anyone asks about cost, this step has a measured trap worth telling: a selective
+filter in vector search needs a high `numCandidates`, because the ANN walks the
+graph of the entire collection and discards during the walk. With 360 candidates
+the network returned **one** reason; the data held nine. The server ceiling is
+10,000, and that is a design limit, not a tuning knob.
+
+### 9. Action — flag the network (2 min)
+Be at **depth 3** before clicking: at hop 1 the button flags 7 nodes, and blocking
+part of a ring is not the action an analyst would take. The screen itself warns you
+when you are shallow.
+
+**Flag N nodes for investigation.** An ACID transaction updates accounts, people and
+the audit record together. The case card opens in the same column, with
+`readConcern: snapshot`, `writeConcern: majority`, the commit time and the
+before/after of the accounts (`active` → blocked). **On the graph, flagged nodes get
+a dashed border** — the action becomes visible where the investigation happens.
+
+Explain why an intermediate state — half the network blocked, incoherent audit — is
+worse than not having acted.
+
+If the audience is a compliance team, open **"What the bank is now required to do"**
+inside the card. It shows three obligations that come entirely from the audit record
+that committed alongside the block, with no integration to any system:
+
+- **COAF** (BCB Circular 3.978/2020): report a suspicious operation within 24 hours
+  of the decision — and the screen shows the clock running from the case's
+  `opened_at`.
+- **MED** (BCB Resolution 6/2023): the precautionary block of the Special Refund
+  Mechanism, which also has a deadline.
+- **LGPD** (Law 13.709/2018, art. 37): flagging someone as a risk is processing of
+  personal data and requires an auditable record. It is exactly the document the
+  same transaction wrote.
+
+The argument closes like this: if the flagging were not atomic, that report could
+describe a state that never existed — accounts blocked with no audit, or audit with
+no block.
+
+The endpoint also refuses to open a second case over nodes that already belong to
+an open one. That is not just a guard rail, it is the correct banking behaviour:
+you do not open two cases on the same people, you reopen the one that exists.
+
+### 10. Real time, and the A/B that proves it is not a trick (3 min)
+**Inject transaction into the network.** The change stream fires and the alert
+appears with the lookup latency attached. No polling, no scheduled job.
+
+Now the part that is worth it: click **Close case** and inject the same transaction
+again. **No alert** — but the tab does not go empty: a grey line appears saying the
+transaction was *checked*, how many accounts the listener looked at and in how many
+milliseconds. The screen also says, in green, that silence is the correct outcome.
+
+That line exists because silence must not look like a broken demo. It is the visible
+proof that the listener woke up, read the state and decided not to alert.
+
+Do it in the reverse order if you prefer (inject with the network free, flag, inject
+again). Either way the point is the same: the alert consults the real state of the
+accounts, it does not fire because the demo told it to. It is the question that
+always comes up, and answering it before it is asked is worth more than answering it
+afterwards.
+
+**Reset demo** returns everything to the initial state between presentations.
+
+### 11. The graph maintains itself (1 min)
+If someone asks how the edges stay fresh in production — and they usually do — call
+`POST /api/demo/link-accounts`. It inserts two transactions that make two people
+with no connection start using the same device.
+
+Before: `GET /api/connections/between?a=…&b=…` answers `connected: false`. About two
+seconds later, `true`, with `source: "change_stream"`. And the next expansion
+already walks the new edge.
+
+Say what that path does not do as well: it adds and updates edges, it does not prune
+retroactively and it does not backfill. The correct pattern is both, change stream
+for freshness and batch for consistency. It is in
 `docs/adr/0003-manutencao-incremental-de-arestas.md`.
 
-### 11. Fechamento (1-2 min)
-Um sistema a menos para operar, sincronizar, dar backup e proteger. Ofereça
-`COMPETITIVE.md` para quem quiser aprofundar em quando isso **não** se aplica.
+### 12. Closing (1-2 min)
+One less system to operate, synchronise, back up and secure. Offer `COMPETITIVE.md`
+to anyone who wants to go deeper into when this **does not** apply.
 
-## Perguntas frequentes e respostas preparadas
+## Frequently asked questions, with prepared answers
 
-**"Isso escala para bilhões de registros?"**
-Não prometa escala ilimitada, e traga números em vez de adjetivos. Medido num
-grafo de 2,4 milhões de arestas: dois saltos alcançam 21 mil nós em 254 ms, e três
-saltos **não terminam** sem poda — estouram o limite de 100 MB que o
-`$graphLookup` tem para montar o resultado. Com poda, o mesmo traversal leva um
-segundo.
+**"Does this scale to billions of records?"**
+Do not promise unlimited scale, and bring numbers instead of adjectives. Measured on
+a graph of 2.4 million edges: two hops reach 21,000 nodes in 254 ms, and three hops
+**do not finish** without pruning — they exceed the 100 MB limit `$graphLookup` has
+for assembling its result. With pruning, the same traversal takes one second.
 
-Há ainda a restrição de sharding: o `$graphLookup` não lê de forma distribuída de
-uma coleção shardada. Para volumes maiores o padrão muda — isolar as coleções de
-grafo como não-shardadas, ou pré-computar subgrafos. Ver `LIMITATIONS.md`, seções
-1 e 5.
+There is also the sharding constraint: `$graphLookup` does not read in a distributed
+way from a sharded collection. For larger volumes the pattern changes — isolate the
+graph collections as unsharded, or pre-compute subgraphs. See `LIMITATIONS.md`,
+sections 1 and 5.
 
-**"Vocês têm PageRank / detecção de comunidade nativo?"**
-Não. Explique o padrão de integração com Spark/NetworkX de `LIMITATIONS.md §3` e
-pergunte se o caso de uso precisa disso rodando continuamente ou se uma análise
-periódica em batch resolve. Essa pergunta costuma mudar a conversa.
+**"Do you have native PageRank / community detection?"**
+No. Explain the Spark/NetworkX integration pattern in `LIMITATIONS.md §3` and ask
+whether the use case needs that running continuously or whether a periodic analysis
+solves the business problem.
 
-**"Por que não Neo4j direto, já que grafo é o núcleo do problema?"**
-Se o caso for genuinamente *graph-first* com algoritmos pesados contínuos, a
-pergunta é legítima. Use as quatro perguntas de qualificação no fim de
-`COMPETITIVE.md` em vez de responder na defensiva.
+**"Why not just use a graph database?"**
+Sometimes you should — `COMPETITIVE.md` lists exactly when. The question to ask back
+is whether the graph is the product or a lens over a product that already exists.
 
-**"Esse dado sintético não foi desenhado para funcionar?"**
-Foi, e vale dizer: a topologia está documentada em
-`docs/adr/0001-topologia-do-dado-sintetico.md`, inclusive as três alternativas
-descartadas por medição. O que o dado sintético **não** faz é esconder a
-degradação — ela aparece na tela no passo 5.
-
-**"Quanto custou embeddar 600 mil transações?"**
-Menos do que parece, e por um motivo que vale explicar:
-`reason_text` vem de um pool de templates, então o embedder deduplica e chama a
-Voyage algumas dezenas de vezes. Num dataset real de campo livre isso renderia bem
-menos — o custo é proporcional aos textos distintos, não às linhas. Ver
-`docs/adr/0002-vetores-em-512d-quantizados.md`.
+**"The data is synthetic."**
+It is, and the topology was designed on purpose; `docs/adr/0001-topologia-do-dado-sintetico.md`
+records the three alternatives that were discarded by measurement. What the topology
+does not do is hide degradation — that is step 6.

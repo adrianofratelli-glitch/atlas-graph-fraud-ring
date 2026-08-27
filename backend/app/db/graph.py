@@ -19,18 +19,18 @@ from pymongo.errors import ExecutionTimeout, OperationFailure
 from app.config import get_settings
 from app.db.client import get_db, with_retry
 
-EdgeType = Literal["shares_device", "shares_address", "shares_pix_key"]
-ALL_EDGE_TYPES: list[str] = ["shares_device", "shares_address", "shares_pix_key"]
+EdgeType = Literal["shares_device", "shares_address", "same_pix_counterparty"]
+ALL_EDGE_TYPES: list[str] = ["shares_device", "shares_address", "same_pix_counterparty"]
 
 
 def _classificar_falha(exc: OperationFailure) -> str:
     """Traduz a falha do servidor no que o apresentador precisa saber."""
     if isinstance(exc, ExecutionTimeout):
-        return "tempo limite: o traversal não terminou dentro do teto configurado"
+        return "timeout: the traversal did not finish within the configured ceiling"
     msg = str(exc)
     if "exceeds" in msg and "bytes" in msg:
-        return "limite de 100 MB do documento de saída do $graphLookup"
-    return f"agregação falhou: {msg.split(', full error')[0]}"
+        return "100 MB limit on the $graphLookup output document"
+    return f"aggregation failed: {msg.split(', full error')[0]}"
 
 
 def clamp_depth(requested: int | None) -> int:
@@ -48,7 +48,11 @@ def _restrict(edge_types: list[str] | None, prune_hubs: bool) -> dict[str, Any] 
     diferença é que aqui ele é um filtro de documento comum.
     """
     clauses: list[dict[str, Any]] = []
-    if edge_types and set(edge_types) != set(ALL_EDGE_TYPES):
+    # `None` (parâmetro ausente) e `[]` (nenhum tipo marcado) são coisas
+    # diferentes, e tratá-los igual era um bug visível na demo: desmarcar as três
+    # caixas de aresta devolvia o grafo INTEIRO em vez de nenhum vínculo — o
+    # oposto do que o apresentador acabou de dizer que ia acontecer.
+    if edge_types is not None and set(edge_types) != set(ALL_EDGE_TYPES):
         clauses.append({"type": {"$in": list(edge_types)}})
     if prune_hubs:
         clauses.append({"weight": {"$lte": get_settings().hub_threshold}})
@@ -127,9 +131,9 @@ def expand_network(
             "elapsed_ms": elapsed_ms,
             "error": _classificar_falha(exc),
             "hint": (
-                "Reduza a profundidade, ligue a poda de hubs, ou restrinja os tipos de "
-                "aresta. O `$graphLookup` monta o traversal inteiro num documento só, "
-                "e ele tem teto de 100 MB — ver LIMITATIONS.md §5."
+                "Reduce the depth, turn on hub pruning, or restrict the edge types. "
+                "`$graphLookup` builds the whole traversal into a single document, and that "
+                "document is capped at 100 MB — see LIMITATIONS.md §5."
             ),
         }
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
@@ -179,26 +183,67 @@ def _assemble(
             lambda: list(
                 get_db().people.find(
                     {"_id": {"$in": node_ids}},
-                    {"name": 1, "ring_id": 1, "risk_flags": 1, "addresses.city": 1},
+                    {
+                        "name": 1,
+                        "ring_id": 1,
+                        "risk_flags": 1,
+                        "addresses.city": 1,
+                        "case_id": 1,
+                        "created_at": 1,
+                    },
                 )
             ),
             "hidratação de nós",
         )
     }
 
-    nodes = [
-        {
-            "id": nid,
-            "label": people.get(nid, {}).get("name", nid[:14]),
-            "ring_id": people.get(nid, {}).get("ring_id"),
-            "risk_flags": people.get(nid, {}).get("risk_flags", []),
-            "hops": hop_of.get(nid, 0),
-            "is_root": nid == person_id,
-        }
-        for nid in node_ids
-    ]
+    # As contas viajam junto com o nó por dois motivos de demonstração:
+    #
+    # 1. `status` é o que a transação ACID muda. Sem ele na tela, marcar a rede é
+    #    uma linha de texto e o efeito da ação fica invisível no grafo.
+    # 2. `opened_at` é evidência: quatro contas de CPFs diferentes abertas na
+    #    mesma semana, operando do mesmo dispositivo, é fazenda de mulas. O
+    #    analista lê isso sem precisar que o apresentador narre.
+    contas: dict[str, list[dict[str, Any]]] = {}
+    for a in with_retry(
+        lambda: list(
+            get_db().accounts.find(
+                {"person_id": {"$in": node_ids}},
+                {"person_id": 1, "status": 1, "opened_at": 1, "case_id": 1,
+                 "account_type": 1, "pix_key_type": 1},
+            )
+        ),
+        "hidratação de contas",
+    ):
+        contas.setdefault(a["person_id"], []).append(a)
+
+    nodes = []
+    for nid in node_ids:
+        pessoa = people.get(nid, {})
+        minhas = contas.get(nid, [])
+        marcadas = [c for c in minhas if c.get("status") == "under_investigation"]
+        aberturas = sorted(c["opened_at"] for c in minhas if c.get("opened_at"))
+        nodes.append(
+            {
+                "id": nid,
+                "label": pessoa.get("name", nid[:14]),
+                "ring_id": pessoa.get("ring_id"),
+                "risk_flags": pessoa.get("risk_flags", []),
+                "hops": hop_of.get(nid, 0),
+                "is_root": nid == person_id,
+                "city": (pessoa.get("addresses") or [{}])[0].get("city"),
+                "accounts": len(minhas),
+                "account_types": sorted({c.get("account_type") for c in minhas if c.get("account_type")}),
+                "first_account_opened_at": aberturas[0].isoformat() if aberturas else None,
+                "last_account_opened_at": aberturas[-1].isoformat() if aberturas else None,
+                # `flagged` é o que faz o nó aparecer tracejado no canvas.
+                "flagged": bool(marcadas),
+                "case_id": pessoa.get("case_id") or (marcadas[0].get("case_id") if marcadas else None),
+            }
+        )
 
     ring_nodes = sum(1 for n in nodes if n["ring_id"])
+    flagged_nodes = sum(1 for n in nodes if n["flagged"])
     # Aresta bidirecional aparece duas vezes; a contagem visual usa o par ordenado.
     unique_edges = {tuple(sorted((e["from"], e["to"]))) + (e["type"],) for e in edges}
 
@@ -214,12 +259,13 @@ def _assemble(
             "edges_unique": len(unique_edges),
             "edges_before_truncation": root.get("edge_count_total", len(edges)),
             "ring_nodes": ring_nodes,
+            "flagged_nodes": flagged_nodes,
             "truncated": truncated,
             "max_nodes": s.max_nodes,
             "elapsed_ms": elapsed_ms,
         },
         "query": {
-            "pattern": "B — arestas explícitas em `connections`",
+            "pattern": "B — explicit edges in `connections`",
             "edge_types": edge_types or ALL_EDGE_TYPES,
             "prune_hubs": prune_hubs,
             "hub_threshold": s.hub_threshold,
@@ -274,7 +320,7 @@ def expand_by_shared_device(account_id: str, depth: int | None = None) -> dict[s
             "found": True,
             "depth": d,
             "elapsed_ms": elapsed_ms,
-            "pattern": "A — atributo compartilhado (device_id) como aresta implícita",
+            "pattern": "A — shared attribute (device_id) as an implicit edge",
         }
     )
     return out
@@ -320,5 +366,5 @@ def hops_between(source: str, target: str, max_depth: int | None = None) -> dict
         "searched_to_depth": d,
         "via": docs[0].get("edges", []),
         "elapsed_ms": elapsed_ms,
-        "caveat": "BFS com depthField, não shortest-path otimizado — ver LIMITATIONS.md §2",
+        "caveat": "BFS with depthField, not optimised shortest-path — see LIMITATIONS.md §2",
     }

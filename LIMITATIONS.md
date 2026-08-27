@@ -1,136 +1,149 @@
-# O que este projeto não resolve
+# What this project does not solve
 
-Leia antes de apresentar para alguém.
+Read this before presenting it to anyone.
 
-A ideia aqui é mostrar que dá para investigar um grafo dentro do banco onde os
-dados já estão. Não é dizer que o MongoDB substitui um banco de grafo em toda
-situação, porque não substitui.
+The idea here is to show that you can investigate a graph inside the database
+where the data already lives. It is not a claim that MongoDB replaces a graph
+database in every situation, because it does not.
 
-Trazer estas limitações você mesmo, no meio da conversa, costuma funcionar melhor
-do que esperar que ninguém pergunte. O roteiro em `docs/demo-script.md` já traz a
-questão de custo no passo 5, antes do fechamento, por isso.
+Raising these limitations yourself, mid-conversation, tends to work better than
+hoping nobody asks. That is why the script in `docs/demo-script.md` already brings
+up cost at step 5, before the close.
 
-## 1. `$graphLookup` e sharding
+## 1. `$graphLookup` and sharding
 
-O `$graphLookup` não lê de forma distribuída de uma coleção shardada. A coleção
-que ele percorre precisa ser não-shardada. Isso é uma restrição de arquitetura,
-não uma configuração que se ajusta.
+`$graphLookup` does not read in a distributed way from a sharded collection. The
+collection it traverses has to be unsharded. That is an architectural constraint,
+not a setting you tune.
 
-**Como contornar:**
-- Isolar as coleções de traversal (`connections`, e a coleção de entidades) como
-  não-shardadas, mesmo que as coleções operacionais de altíssimo volume
-  (`transactions`) sejam shardadas. É exatamente a separação que este projeto usa:
-  o grafo vive em `connections`, materializada a partir de `transactions`.
-- Para grafos de entidades que não cabem em uma coleção não-shardada com
-  performance aceitável, o padrão correto é **pré-computar** comunidades e
-  subgrafos relevantes (Atlas Data Federation, Spark Connector, job em batch) e
-  materializar o resultado numa coleção menor, otimizada para traversal.
+**How to work around it:**
+- Keep the traversal collections (`connections`, and the entity collection)
+  unsharded, even when the very high volume operational collections
+  (`transactions`) are sharded. That is exactly the split this project uses: the
+  graph lives in `connections`, materialised from `transactions`.
+- For entity graphs that will not fit in an unsharded collection with acceptable
+  performance, the right pattern is to **pre-compute** the relevant communities and
+  subgraphs (Atlas Data Federation, Spark Connector, a batch job) and materialise
+  the result into a smaller collection optimised for traversal.
 
-## 2. Não existe uma linguagem de consulta de grafo
+## 2. There is no graph query language
 
-MongoDB não tem equivalente a Cypher ou Gremlin. `$graphLookup` faz traversal
-(BFS a partir de um ponto de entrada), não casamento de padrão de grafo — nada de
-"encontre todos os triângulos" ou shortest-path genérico otimizado entre dois nós
-arbitrários.
+MongoDB has no equivalent to Cypher or Gremlin. `$graphLookup` does traversal
+(BFS from an entry point), not graph pattern matching — no "find all triangles",
+no optimised generic shortest path between two arbitrary nodes.
 
-**O que este projeto oferece no lugar:** `/api/hops` calcula distância entre duas
-entidades com `$graphLookup` + `depthField`, o que resolve a pergunta que a
-investigação de fraude realmente faz ("quantos saltos separam A de B"). A própria
-resposta da API carrega o campo `caveat` dizendo que isso não é shortest-path
-otimizado. Se essa distinção importa para o caso do cliente, ela vai aparecer na
-qualificação — melhor que apareça agora.
+**What this project offers instead:** `/api/hops` computes the distance between two
+entities with `$graphLookup` plus `depthField`, which answers the question a fraud
+investigation actually asks ("how many hops separate A from B"). The API response
+itself carries a `caveat` field saying this is not optimised shortest path. If that
+distinction matters for the customer's use case, it will surface during
+qualification — better that it surfaces now.
 
-## 3. Não existem algoritmos de grafo no servidor
+## 3. There are no graph algorithms on the server
 
-Não existem no MongoDB implementações nativas de PageRank, detecção de comunidade
-(Louvain, Label Propagation) ou centralidade (betweenness, closeness). Neo4j
-oferece isso via Graph Data Science; Neptune, parcialmente via Neptune Analytics.
+MongoDB has no native implementations of PageRank, community detection (Louvain,
+Label Propagation) or centrality (betweenness, closeness). Neo4j offers those via
+Graph Data Science; Neptune, partially, via Neptune Analytics.
 
-**O caminho quando isso é necessário:** MongoDB como sistema operacional de
-registro → export via Spark Connector (ou Kafka Connector, em streaming) →
-processamento em Spark GraphX ou NetworkX/igraph **sobre um subgrafo relevante,
-nunca sobre o dataset inteiro** → scores e clusters escritos de volta no MongoDB
-como atributo do documento, consumidos normalmente pela aplicação.
+**The path when that is needed:** MongoDB as the operational system of record,
+exported via the Spark Connector (or the Kafka Connector, for streaming),
+processed in Spark GraphX or NetworkX/igraph **over a relevant subgraph, never
+over the whole dataset**, with the scores and clusters written back into MongoDB as
+document attributes and consumed normally by the application.
 
-**Quando um banco de grafo dedicado é a resposta certa:** cargas *graph-first*, com
-algoritmos pesados rodando continuamente em produção sobre a base inteira (um
-motor de recomendação com PageRank recalculado em tempo real sobre bilhões de
-arestas, por exemplo). Nesse cenário a resposta honesta é que Neo4j e Neptune têm
-vantagem estrutural.
+**When a dedicated graph database is the right answer:** *graph-first* workloads,
+with heavy algorithms running continuously in production over the entire base — a
+recommendation engine recalculating PageRank in real time over billions of edges,
+for example. In that scenario the honest answer is that Neo4j and Neptune have a
+structural advantage.
 
-## 4. O custo cresce com o número de vizinhos, e não com a profundidade
+## 4. Cost grows with the number of neighbours, not with depth
 
-`$graphLookup` é um BFS iterativo: cada nível dispara novas buscas. O custo cresce
-com o **fan-out alcançado**, não com o número em `maxDepth`.
+`$graphLookup` is an iterative BFS: each level fires new lookups. Cost grows with
+the **fan-out reached**, not with the number in `maxDepth`.
 
-### O que a rede de fraude mostra
+### What the fraud ring shows
 
-Entrando pelo líder de uma rede de 30 membros, no dataset padrão (piso de rede
-8,5 ms):
+Entering through the leader of a 30-member ring, on the default dataset:
 
-| Profundidade | Nós alcançados | Membros da rede | Tempo (ms) |
+| Depth | Nodes reached | Ring members | Behaviour |
 |---|---|---|---|
-| 1 | 7 | 7/30 | 9,2 |
-| 2 | 15 | 15/30 | 9,1 |
-| 3 | 30 | **30/30** | 9,5 |
-| 4 | 30 | 30/30 | 10,0 |
-| 5 | 30 | 30/30 | 11,0 |
+| 1 | 7 | 7/30 | a handful of direct links |
+| 2 | 16 | 16/30 | half the ring |
+| 3 | 31 | **30/30** | the ring closes |
+| 4 | 31 | 30/30 | saturated |
+| 5 | 31 | 30/30 | saturated |
 
-Repare no que **não** acontece: a partir da profundidade 3 o traversal satura. A
-rede é um componente fechado, e aumentar a profundidade não alcança mais ninguém.
-(30 execuções por linha, descartando o aquecimento; ver
-[`queries/benchmarks.md`](queries/benchmarks.md).)
+Note what does **not** happen: from depth 3 on, the traversal saturates. The ring
+is a closed component, and adding depth reaches nobody new. Times per depth are in
+[`queries/benchmarks.md`](queries/benchmarks.md), measured over 30 runs per row
+discarding warm-up.
 
-**Não use este caso para falar de degradação** — ele prova o contrário. Se disser
-ao cliente que a profundidade 5 é cara e a tela mostrar 30 nós em 11 ms, a demo
-desmente o apresentador.
+**Do not use this case to talk about degradation** — it proves the opposite. If you
+tell a customer that depth 5 is expensive and the screen shows the same 31 nodes in
+the same time, the demo contradicts the presenter.
 
-### Onde a degradação realmente aparece
+### Where degradation actually shows up
 
-Num hub. Medido neste dataset, com `queries/07_hub_fanout.js`:
+At a hub. Measured on this dataset, with `queries/07_hub_fanout.js`:
 
 | | |
 |---|---|
-| Dispositivo mais compartilhado | operado por **7.125 contas** distintas |
-| Padrão A, um único salto a partir dele | 7.125 contas, 7.236 transações, **1.499 ms** a frio (304 ms com cache quente) |
+| Most shared device | operated by **7,125** distinct accounts |
+| Pattern A, a single hop from it | 7,125 accounts, 7,236 transactions, **1,499 ms** cold (304 ms warm) |
 
-Um salto. Milhares de contas sem relação nenhuma entre si. É esse o custo que a
-poda evita — e é por isso que a poda que importa acontece **na materialização**,
-não em tempo de query.
+One hop. Thousands of accounts with no relationship whatsoever to each other. That
+is the cost pruning avoids — and it is why the pruning that matters happens **at
+materialisation**, not at query time.
 
-`materialize_connections.py --report-only` mostra o que ela descarta:
+`materialize_connections.py --report-only` shows what it discards:
 
-| Tipo de hub | Grupos descartados | Alcance |
+| Hub type | Groups discarded | Reach |
 |---|---|---|
-| endereço | 3 | 8.618 pessoas |
-| dispositivo | 5 | 35.251 contas |
+| address | 3 | 8,618 people |
+| device | 5 | 35,251 accounts |
 
-Sem esse descarte, essas 8.618 pessoas ficariam mutuamente conectadas em um salto.
+Without that discard, those 8,618 people would be mutually connected one hop apart.
 
-### As duas camadas de mitigação
+### The two mitigation layers
 
-1. **Na materialização** (`materialize_connections.py`): um atributo só vira
-   aresta se o fan-out estiver abaixo de `HUB_FANOUT_THRESHOLD`. O endereço de uma
-   agência bancária não é evidência de vínculo — materializá-lo transformaria
-   metade da base num único componente conexo.
-2. **Em tempo de query** (`restrictSearchWithMatch`): poda por tipo e por peso de
-   aresta, exposta na UI como um toggle.
+1. **At materialisation** (`materialize_connections.py`): an attribute only becomes
+   an edge if its fan-out is below `HUB_FANOUT_THRESHOLD`. A bank branch's address
+   is not evidence of a link — materialising it would turn half the database into a
+   single connected component.
+2. **At query time** (`restrictSearchWithMatch`): pruning by edge type and edge
+   weight, exposed in the UI as a toggle.
 
-**Medido: neste dataset a poda em tempo de query deixa a query mais lenta** — 633
-ms com poda contra 530 ms sem, devolvendo os mesmos 28 nós. Ela não tem nada a
-remover, porque a materialização já removeu, e o filtro extra é custo puro. O
-toggle continua na tela porque em uma base real, onde as arestas chegam prontas de
-um sistema anterior, ele volta a ser o controle principal — mas aqui é a segunda
-linha de defesa, não a primeira. Dizer isso é mais convincente do que fingir que a
-poda sempre ajuda.
+**Measured: on this dataset query-time pruning makes the query slower** — it has
+nothing left to remove, because materialisation already removed it, and the extra
+filter is pure cost. The toggle stays on screen because in a real database, where
+edges arrive ready-made from an upstream system, it becomes the primary control
+again — but here it is the second line of defence, not the first. Saying that is
+more convincing than pretending pruning always helps.
 
-## 5. O teto de 100 MB no resultado do `$graphLookup`
+### The edge-type toggle tells you which link holds the ring together
 
-Esta é a limitação mais importante da lista, e ela apareceu medindo.
+The three checkboxes are not decoration. On the default entry point, at depth 3:
 
-`$graphLookup` acumula o traversal inteiro num único array (`as: "network"`)
-dentro de **um** documento. Documento intermediário de agregação tem limite de
-100 MB, e o estágio estoura quando o traversal é grande:
+| Edges enabled | Nodes reached |
+|---|---|
+| all three | 31 |
+| without destination PIX key | 31 |
+| without address | 30 |
+| **without device** | **3** |
+
+The device fingerprint is what holds this ring together; address and destination
+key are reinforcement. That is a hypothesis an analyst can test live, in front of
+the customer, without writing a query.
+
+## 5. The 100 MB ceiling on the `$graphLookup` result
+
+This is the most important limitation on the list, and it showed up through
+measurement.
+
+`$graphLookup` accumulates the entire traversal into a single array (`as:
+"network"`) inside **one** document. An intermediate aggregation document is
+capped at 100 MB, and the stage blows up when the traversal is large:
 
 ```
 Executor error during aggregate command ... caused by ::
@@ -138,100 +151,116 @@ Total size of the output document exceeds 104857600 bytes.
 Consider using $unwind to split the output.
 ```
 
-Medido em `tests/scale_graph.py`, sobre um grafo de **2,4 milhões de arestas
-dirigidas** (anexação preferencial, 150 mil nós), entrando por um nó de grau 398:
+Measured in `tests/scale_graph.py`, over a graph of **2.4 million directed edges**
+(preferential attachment, 150,000 nodes):
 
-| Entrada | Profundidade | Resultado |
+| Entry | Depth | Result |
 |---|---|---|
-| grau 340 | 1 | 10.668 nós, 11.894 arestas, **110 ms** |
-| grau 340 | 2 | **falha** — estoura os 100 MB após 38 s |
-| grau 14 | 2 | 21.278 nós, 25.809 arestas, **254 ms** |
-| grau 14 | 3 | **falha** — estoura os 100 MB após 180 s |
-| grau 18 | 3 | **falha** — estoura os 100 MB após 41 s |
-| grau 18 | 3, **com poda** | 33.872 nós, 45.318 arestas, **1.044 ms** |
+| degree 340 | 1 | 10,668 nodes, 11,894 edges, **110 ms** |
+| degree 340 | 2 | **fails** — exceeds 100 MB after 38 s |
+| degree 14 | 2 | 21,278 nodes, 25,809 edges, **254 ms** |
+| degree 14 | 3 | **fails** — exceeds 100 MB after 180 s |
+| degree 18 | 3 | **fails** — exceeds 100 MB after 41 s |
+| degree 18 | 3, **with pruning** | 33,872 nodes, 45,318 edges, **1,044 ms** |
 
-Repare no par das duas últimas linhas: a mesma pergunta é impossível sem poda e
-custa um segundo com poda.
+Look at the pair in the last two rows: the same question is impossible without
+pruning and costs one second with it.
 
-E repare no tempo **antes** da falha — de 38 a 180 segundos. O estágio não falha rápido: ele
-percorre, acumula, e só descobre que não cabe quando já gastou o tempo. Por isso o
-backend passa `maxTimeMS` (`GRAPH_MAX_TIME_MS`, padrão 15 s) — sem ele, o cliente
-olha uma tela parada por até três minutos para receber um erro.
+And look at the time **before** the failure — 38 to 180 seconds. The stage does not
+fail fast: it traverses, accumulates, and only discovers it does not fit once the
+time is already spent. That is why the backend passes `maxTimeMS`
+(`GRAPH_MAX_TIME_MS`, default 15 s) — without it the client stares at a frozen
+screen for up to three minutes to receive an error.
 
-**`allowDiskUse` não ajuda.** Não é spill de sort ou de group: é o tamanho de um
-único documento. O teto é estrutural.
+**`allowDiskUse` does not help.** This is not a sort or group spill: it is the size
+of a single document. The ceiling is structural.
 
-**`GRAPH_MAX_NODES` do backend não protege**, e `GRAPH_MAX_TIME_MS` só limita o
-prejuízo. O truncamento acontece no
-código da aplicação, depois que o estágio já montou o array inteiro no servidor.
-Um cliente que peça profundidade 3 num grafo grande recebe erro do Mongo, não um
-resultado truncado — o backend traduz em 503, mas o traversal não aconteceu.
+**The backend's `GRAPH_MAX_NODES` does not protect you**, and `GRAPH_MAX_TIME_MS`
+only limits the damage. Truncation happens in application code, after the stage has
+already built the whole array on the server. A client asking for depth 3 on a large
+graph gets an error from Mongo, not a truncated result — the backend translates it
+into a 503, but the traversal did not happen.
 
-### O que realmente protege
+### What actually protects you
 
-1. **`restrictSearchWithMatch`**, que poda *durante* o traversal, antes de o array
-   crescer. Medido: o mesmo traversal que estoura em 41 s sem poda termina em
-   **1.044 ms** com poda; e na profundidade 1 a partir de um nó de grau 340,
-   104 ms sem poda contra 45 ms com. Não é um filtro cosmético — é o que torna a query
-   possível, e é a razão de o toggle existir na UI. Um `$match` **depois** do
-   `$graphLookup` não salvaria nada: o estágio já teria estourado.
-2. **Profundidade baixa** com expansão sob demanda: expandir um nó por vez a
-   partir do resultado anterior, em vez de pedir a vizinhança inteira de uma vez.
-3. **Pré-computar subgrafos** (§1) quando o componente relevante é grande demais
-   para caber num traversal só.
+1. **`restrictSearchWithMatch`**, which prunes *during* the traversal, before the
+   array grows. Measured: the same traversal that blows up after 41 s without
+   pruning finishes in **1,044 ms** with it; and at depth 1 from a degree-340 node,
+   104 ms without pruning against 45 ms with. It is not a cosmetic filter — it is
+   what makes the query possible, and it is the reason the toggle exists in the UI.
+   A `$match` **after** `$graphLookup` would save nothing: the stage would already
+   have blown up.
+2. **Low depth** with on-demand expansion: expand one node at a time from the
+   previous result, instead of asking for the whole neighbourhood at once.
+3. **Pre-computed subgraphs** (§1) when the relevant component is too large to fit
+   in a single traversal.
 
-### O que dizer ao cliente
+### What to tell the customer
 
-Que existe um teto, qual é, e como se contorna. Um arquiteto que descobre esse
-limite sozinho, depois de comprar a ideia, perde a confiança em tudo que foi dito
-antes. Um arquiteto que ouve isso na demo entende que o projeto foi medida de verdade.
+That a ceiling exists, what it is, and how it is worked around. An architect who
+discovers this limit alone, after buying into the idea, loses confidence in
+everything said before it. An architect who hears it during the demo understands
+that the project was actually measured.
 
-A comparação honesta: um banco de grafo dedicado não tem esse teto específico —
-ele transmite o resultado em vez de materializar um documento. Em compensação,
-`$graphLookup` roda dentro da mesma transação e do mesmo cluster do dado
-operacional. É um trade-off real, e é assim que deve ser apresentado.
+The honest comparison: a dedicated graph database does not have this specific
+ceiling — it streams the result instead of materialising a document. In exchange,
+`$graphLookup` runs inside the same transaction and the same cluster as the
+operational data. It is a real trade-off, and it should be presented as one.
 
-## 6. O grafo da demo é pequeno, e essa é a objeção mais forte
+## 6. The demo graph is small, and that is the strongest objection
 
-Convém dizer isso antes que perguntem. As redes injetadas têm 30 membros e formam
-componentes fechados; o traversal sobre elas custa ~20 ms de trabalho real, contra
-um piso de rede de 8,5 ms. Isso prova que o `$graphLookup` **encontra** a rede.
-Não prova nada sobre custo, porque a busca nunca faz trabalho pesado.
+Best to say so before anyone asks. The injected rings have 30 members and form
+closed components; traversing them costs a few milliseconds of real work. That
+proves `$graphLookup` **finds** the network. It proves nothing about cost, because
+the search never does heavy work.
 
-Quem trabalha com dez milhões de entidades e ouve "30 nós em 9 milissegundos" tem
-razão em não se impressionar: o número não fala do problema dele.
+Someone who works with ten million entities and hears "30 nodes in 9 milliseconds"
+is right not to be impressed: the number does not speak to their problem.
 
-Por isso existe `tests/scale_graph.py`, que constrói um grafo de anexação
-preferencial de **~2,4 milhões de arestas dirigidas** sobre as mesmas 150 mil
-pessoas e mede o traversal a partir de nós de grau alto, médio e baixo. Os números
-estão em [`queries/benchmarks.md`](queries/benchmarks.md), seção *Escala*. Use
-esses, não os do anel, quando a conversa for sobre volume.
+That is why `tests/scale_graph.py` exists. It builds a preferential-attachment
+graph of **~2.4 million directed edges** over the same 150,000 people and measures
+traversal from high, medium and low degree nodes. The numbers are in
+[`queries/benchmarks.md`](queries/benchmarks.md), section *Scale*. Use those, not
+the ring's, when the conversation is about volume.
 
-O que continua fora do escopo mesmo com o teste de escala: bilhões de arestas,
-grafo shardado (§1) e algoritmos pesados contínuos (§3).
+What remains out of scope even with the scale test: billions of edges, a sharded
+graph (§1) and heavy continuous algorithms (§3).
 
-## 7. Os dados são sintéticos, e a topologia foi desenhada de propósito
+## 7. Selective filters in vector search have a ceiling of their own
 
-Sim. Está documentado em `docs/adr/0001-topologia-do-dado-sintetico.md`, inclusive
-as três alternativas descartadas por medição e por quê. O que a topologia **não**
-faz é esconder a degradação: ela aparece na tabela acima e na tela, no passo 5 do
-roteiro.
+Scoping the semantic panel to the ring on screen uses `ring_id`, which is already a
+filter field on the vector index. But `$vectorSearch` walks the HNSW graph of the
+**entire collection** and applies the filter during the walk. A very selective
+filter — 137 transactions of one ring inside 604,000 — discards almost every
+candidate, and with a low `numCandidates` the search runs out before it has
+gathered results.
 
-O que o dado sintético não prova: distribuição de fan-out de uma base real, ruído
-de qualidade de cadastro, e o comportamento de `reason_text` de campo livre
-verdadeiro (aqui ele vem de um pool de templates — ver
+Measured: with `numCandidates: 360` the ring returned **one** reason; the data held
+nine. Raising it to 10,000 returns all of them — and 10,000 is the server's
+ceiling (`"numCandidates" must be within bounds [1..10000]`), not a number someone
+picked. That also bounds how selective a filter can usefully be here.
+
+## 8. The data is synthetic, and the topology was designed on purpose
+
+Yes. It is documented in `docs/adr/0001-topologia-do-dado-sintetico.md`, including
+the three alternatives discarded by measurement and why. What the topology does
+**not** do is hide degradation: that shows up in the table above and on screen, at
+step 5 of the script.
+
+What synthetic data does not prove: the fan-out distribution of a real database,
+the noise of real customer-record quality, and the behaviour of genuinely free-text
+`reason_text` (here it comes from a pool of templates — see
 `docs/adr/0002-vetores-em-512d-quantizados.md`).
 
-## 8. O escopo deste projeto
+## 9. The scope of this project
 
-Traversal e investigação sobre um grafo de entidades de tamanho moderado: 150 mil
-pessoas, ~240 mil contas, 600 mil transações, ~118 mil arestas materializadas —
-mais um grafo sintético de 2,4 M de arestas usado só para medir escala.
-**Não** é evidência de comportamento em bilhões de arestas com algoritmos pesados
-rodando continuamente — para esse cenário, ver a seção 3.
+Traversal and investigation over a moderately sized entity graph: 150,000 people,
+~240,000 accounts, 604,000 transactions, ~119,000 materialised edges — plus a
+synthetic 2.4 M edge graph used only to measure scale. It is **not** evidence of
+behaviour at billions of edges with heavy algorithms running continuously; for that
+scenario, see section 3.
 
-O cluster da demo é um **M20 compartilhado com outras aplicações**. Isso molda
-decisões técnicas: os vetores são de 512 dimensões,
-gravados como BinData float32, com índice quantizado (ver
-`docs/adr/0002-vetores-em-512d-quantizados.md`). Um dimensionamento para produção
-partiria de outro lugar.
+The demo cluster is an **M20 shared with other applications**. That shapes
+technical decisions: the vectors are 512-dimensional, stored as BinData float32,
+with a quantised index (see `docs/adr/0002-vetores-em-512d-quantizados.md`).
+Sizing for production would start somewhere else.

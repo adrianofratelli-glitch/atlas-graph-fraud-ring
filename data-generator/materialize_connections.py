@@ -34,6 +34,10 @@ NOW = datetime(2026, 8, 26, tzinfo=timezone.utc)
 # hub, o custo é quadrático, então o teto de pares por grupo é explícito.
 MAX_PAIRS_PER_GROUP = 400
 
+# Quantas vezes um pagador precisa ter pago à mesma chave para o destino contar
+# como vínculo. Um pagamento avulso a um lojista é compra, não cumplicidade.
+MIN_PIX_HITS = 2
+
 
 def edges_from_groups(groups, edge_type: str, threshold: int):
     """Cada grupo é (chave, [ids de pessoas]). Emite arestas nos dois sentidos."""
@@ -96,16 +100,47 @@ def address_groups(db, threshold: int):
         yield doc["_id"], doc["people"]
 
 
-def pix_groups(db, threshold: int):
+def pix_counterparty_groups(db, threshold: int):
+    """chave PIX de destino -> pessoas que *pagaram* para aquela chave.
+
+    Não é "duas pessoas com a mesma chave": isso não existe. O DICT (Resolução
+    BCB nº 1/2020) garante que uma chave endereça uma única conta transacional
+    por vez, e rejeita o cadastro duplicado. Modelar assim era um erro factual
+    que qualquer arquiteto de banco derruba na primeira pergunta.
+
+    O vínculo real é o **destino em comum**: contas sem relação nenhuma entre si
+    que pingam repetidamente na mesma chave. É a conta de arrecadação no fim do
+    funil de mulas, e é o padrão que os times de PLD caçam de verdade.
+
+    Duas guardas contra ruído legítimo:
+      - o pagador precisa ter pago àquela chave **mais de uma vez** (`MIN_PIX_HITS`):
+        um pagamento único para um lojista não é vínculo, é compra;
+      - a chave que recebe de mais de `threshold` pessoas é hub (lojista, PSP,
+        concessionária) e não vira aresta — mesma regra de fan-out dos demais tipos.
+    """
     pipeline = [
-        {"$match": {"pix_key": {"$exists": True}}},
-        {"$group": {"_id": "$pix_key", "people": {"$addToSet": "$_id"}}},
+        {"$match": {"to_pix_key": {"$ne": None}}},
+        # Pagador distinto por chave, com quantas vezes pagou.
+        {"$group": {
+            "_id": {"chave": "$to_pix_key", "conta": "$from_account"},
+            "vezes": {"$sum": 1},
+        }},
+        {"$match": {"vezes": {"$gte": MIN_PIX_HITS}}},
+        {"$group": {"_id": "$_id.chave", "accounts": {"$addToSet": "$_id.conta"}}},
+        {"$match": {"$expr": {"$and": [
+            {"$gte": [{"$size": "$accounts"}, 2]},
+            {"$lte": [{"$size": "$accounts"}, threshold]},
+        ]}}},
+        {"$unwind": "$accounts"},
+        {"$lookup": {"from": "accounts", "localField": "accounts", "foreignField": "_id", "as": "a"}},
+        {"$unwind": "$a"},
+        {"$group": {"_id": "$_id", "people": {"$addToSet": "$a.person_id"}}},
         {"$match": {"$expr": {"$and": [
             {"$gte": [{"$size": "$people"}, 2]},
             {"$lte": [{"$size": "$people"}, threshold]},
         ]}}},
     ]
-    for doc in db.people.aggregate(pipeline, allowDiskUse=True):
+    for doc in db.transactions.aggregate(pipeline, allowDiskUse=True):
         yield doc["_id"], doc["people"]
 
 
@@ -139,6 +174,18 @@ def hub_report(db, threshold: int) -> None:
     print(f"  dispositivos: {len(dev)} grupos, {sum(d['n'] for d in dev):,} contas")
     for d in dev[:3]:
         print(f"    {d['_id']}: {d['n']:,} contas")
+
+    pix = list(db.transactions.aggregate([
+        {"$match": {"to_pix_key": {"$ne": None}}},
+        {"$group": {"_id": "$to_pix_key", "pagadores": {"$addToSet": "$from_account"}}},
+        {"$set": {"n": {"$size": "$pagadores"}}},
+        {"$match": {"$expr": {"$gt": ["$n", threshold]}}},
+        {"$project": {"n": 1}},
+        {"$sort": {"n": -1}},
+    ], allowDiskUse=True))
+    print(f"  chaves PIX de destino: {len(pix)} grupos, {sum(x['n'] for x in pix):,} pagadores")
+    for x in pix[:3]:
+        print(f"    {x['_id']}: {x['n']:,} pagadores")
     print()
 
 
@@ -160,7 +207,11 @@ def main() -> None:
     t = args.hub_threshold
     print(f"materializando arestas (limiar de hub = {t})")
     bulk_replace(db.connections, edges_from_groups(address_groups(db, t), "shares_address", t), "shares_address")
-    bulk_replace(db.connections, edges_from_groups(pix_groups(db, t), "shares_pix_key", t), "shares_pix_key")
+    bulk_replace(
+        db.connections,
+        edges_from_groups(pix_counterparty_groups(db, t), "same_pix_counterparty", t),
+        "same_pix_counterparty",
+    )
     bulk_replace(db.connections, edges_from_groups(device_groups(db, t), "shares_device", t), "shares_device")
 
     # Os índices são criados AQUI, não em schema/indexes.js.
@@ -189,7 +240,7 @@ def main() -> None:
 
     total = db.connections.estimated_document_count()
     print(f"\nconnections: {total:,} arestas (bidirecionais)")
-    for tp in ["shares_device", "shares_address", "shares_pix_key"]:
+    for tp in ["shares_device", "shares_address", "same_pix_counterparty"]:
         print(f"  {tp:18s} {db.connections.count_documents({'type': tp}):>10,}")
 
 

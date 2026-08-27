@@ -1,191 +1,213 @@
-# 01 — Arquitetura
+# 01 — Architecture
 
-## Camadas
+## Layers
 
 ```
-┌──────────────────────┐   ┌──────────────────────┐   ┌─────────────────────────┐
-│ React + Vite (5350)   │──▶│ FastAPI (8350)        │──▶│ MongoDB Atlas            │
-│ vis-network            │◀──│ app/db  · acesso      │◀──│ $graphLookup             │
-│ EventSource (SSE)      │   │ app/services · orq.   │   │ Atlas Search             │
-│ tokens do design system│   │ AlertHub (thread)     │   │ Atlas Vector Search      │
-└──────────────────────┘   └──────────────────────┘   │ Change Streams           │
-                                                         │ transação ACID           │
-                                                         └─────────────────────────┘
-                                                                     ▲
-                                                          ┌──────────┴──────────┐
-                                                          │ data-generator/      │
-                                                          │ idempotente          │
-                                                          └─────────────────────┘
+┌────────────────────────┐   ┌────────────────────────┐   ┌─────────────────────────┐
+│ React + Vite (5350)     │──▶│ FastAPI (8350)          │──▶│ MongoDB Atlas            │
+│ vis-network             │◀──│ app/db  · data access   │◀──│ $graphLookup             │
+│ EventSource (SSE)       │   │ app/services · orch.    │   │ Atlas Search             │
+│ shared design tokens    │   │ AlertHub (thread)       │   │ Atlas Vector Search      │
+└────────────────────────┘   └────────────────────────┘   │ Change Streams           │
+                                                            │ ACID transaction         │
+                                                            └─────────────────────────┘
+                                                                        ▲
+                                                             ┌──────────┴──────────┐
+                                                             │ data-generator/      │
+                                                             │ idempotent           │
+                                                             └─────────────────────┘
 ```
 
-Regra de camada: **nenhuma rota importa `pymongo`**. `main.py` só expõe HTTP e
-traduz exceção em código de status; toda query vive em `backend/app/db/`. Isso é
-o que permite trocar driver ou versão sem tocar nas rotas.
+Layering rule: **no route imports `pymongo`**. `main.py` only exposes HTTP and
+translates exceptions into status codes; every query lives in `backend/app/db/`.
+That is what makes it possible to change driver or version without touching the
+routes.
 
-## Invariantes
+## Invariants
 
-1. **`_id` determinístico em todo dado gerado.** `det_id(kind, *parts)` é
-   `uuid5` sobre os atributos-chave. Rodar o gerador duas vezes reescreve os
-   mesmos documentos — nenhuma escrita usa `ObjectId` aleatório.
-2. **O backend decide a profundidade, não o frontend.** `clamp_depth()` limita ao
-   `GRAPH_MAX_DEPTH_CAP` (padrão 6). Uma expansão sem teto é o jeito mais rápido
-   de travar uma demo ao vivo.
-3. **Retry só para falha transitória de rede.** `with_retry()` repete
-   `AutoReconnect`, `NetworkTimeout` e `ConnectionFailure` com backoff
-   exponencial, no máximo 3 vezes. Erro de lógica ou de validação nunca é
-   repetido — repetir esconde bug.
-4. **Degradação por recurso, não por tela.** Índice de Search/Vector ausente ou
-   `BUILDING` vira `503` com `{feature, index, status}`; o frontend mostra um
-   badge naquele painel e o traversal continua funcionando.
-5. **Ground truth rastreável.** Toda rede injetada tem `ring_id` em `people`,
-   `accounts` e `transactions`, e um resumo em `rings`. A demo nunca depende de a
-   aleatoriedade ter cooperado.
-6. **Teto de nós devolvidos.** `GRAPH_MAX_NODES` (padrão 1200) trunca pela menor
-   distância em saltos. O gargalo em profundidade alta é o navegador, não o Atlas;
-   truncar pela periferia preserva o que interessa e o payload informa
-   `truncated: true` para a UI dizer isso em voz alta.
-7. **Teto de tempo, não só de tamanho.** Todo traversal roda com `maxTimeMS`
-   (`GRAPH_MAX_TIME_MS`, padrão 15 s). Medido num grafo de 2,4 M de arestas, o
-   `$graphLookup` moeu **97 segundos** antes de estourar o limite de 100 MB do
-   documento de saída. Sem o teto, isso é uma tela parada por um minuto e meio
-   para no fim dar erro. Com ele, a rota devolve `503` com `too_large: true`, o
-   motivo e o que fazer a respeito.
-8. **Corpo de POST passa por schema, não por checagem manual.** Os modelos
-   `pydantic` no topo de `main.py` existem porque dois bugs reais vieram de
-   validação artesanal: `limit: -1` chegava ao `$vectorSearch` e virava 500, e
-   `person_ids` como string era iterado caractere a caractere até a transação
-   abortar com 409.
+1. **Deterministic `_id` on all generated data.** `det_id(kind, *parts)` is a
+   `uuid5` over the key attributes. Running the generator twice rewrites the same
+   documents — no write uses a random `ObjectId`.
+2. **The backend decides the depth, not the frontend.** `clamp_depth()` caps at
+   `GRAPH_MAX_DEPTH_CAP` (default 6). An uncapped expansion is the fastest way to
+   freeze a live demo.
+3. **Retry only for transient network failure.** `with_retry()` retries
+   `AutoReconnect`, `NetworkTimeout` and `ConnectionFailure` with exponential
+   backoff, at most 3 times. A logic or validation error is never retried —
+   retrying hides bugs.
+4. **Degradation per feature, not per screen.** A missing or `BUILDING`
+   Search/Vector index becomes a `503` with `{feature, index, status}`; the
+   frontend shows a badge on that panel and the traversal keeps working.
+5. **Traceable ground truth.** Every injected network carries `ring_id` on
+   `people`, `accounts` and `transactions`, plus a summary in `rings`. The demo
+   never depends on randomness having cooperated.
+6. **Ceiling on returned nodes.** `GRAPH_MAX_NODES` (default 1200) truncates by
+   shortest hop distance. At high depth the bottleneck is the browser, not Atlas;
+   truncating from the periphery preserves what matters, and the payload reports
+   `truncated: true` so the UI can say so out loud.
+7. **A time ceiling, not just a size ceiling.** Every traversal runs with
+   `maxTimeMS` (`GRAPH_MAX_TIME_MS`, default 15 s). Measured on a 2.4 M edge graph,
+   `$graphLookup` ground for **97 seconds** before exceeding the 100 MB
+   output-document limit. Without the ceiling that is a frozen screen for a minute
+   and a half ending in an error. With it, the route returns `503` with
+   `too_large: true`, the reason, and what to do about it.
+8. **POST bodies go through a schema, not manual checks.** The `pydantic` models at
+   the top of `main.py` exist because two real bugs came from hand-rolled
+   validation: `limit: -1` reached `$vectorSearch` and became a 500, and
+   `person_ids` as a string was iterated character by character until the
+   transaction aborted with a 409.
 
-## Variáveis de ambiente
+## Environment variables
 
-| Variável | Padrão | Papel |
+| Variable | Default | Role |
 |---|---|---|
-| `MONGODB_URI` | — | obrigatória |
-| `MONGODB_DB` | `graph_fraud_ring` | banco da POV |
+| `MONGODB_URI` | — | required |
+| `MONGODB_DB` | `graph_fraud_ring` | the project's database |
 | `ATLAS_SEARCH_INDEX_NAME` | `people_entity_resolution` | entity resolution |
-| `VECTOR_INDEX_NAME` | `transactions_reason_vector` | similaridade semântica |
-| `VOYAGE_API_KEY` | — | sem ela, Vector Search degrada com `NO_EMBEDDING_KEY` |
-| `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` | `voyage-3-lite` / `512` | ver ADR 0002 |
-| `GRAPH_MAX_DEPTH_CAP` | `6` | teto absoluto de profundidade |
-| `GRAPH_DEFAULT_DEPTH` | `4` | usado quando o cliente não manda profundidade |
-| `HUB_FANOUT_THRESHOLD` | `50` | limiar de poda de hub |
-| `GRAPH_MAX_NODES` | `1200` | teto de nós no payload |
-| `GRAPH_MAX_TIME_MS` | `15000` | teto de tempo da agregação de traversal |
+| `VECTOR_INDEX_NAME` | `transactions_reason_vector` | semantic similarity |
+| `VOYAGE_API_KEY` | — | without it, Vector Search degrades with `NO_EMBEDDING_KEY` |
+| `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` | `voyage-3-lite` / `512` | see ADR 0002 |
+| `GRAPH_MAX_DEPTH_CAP` | `6` | absolute depth ceiling |
+| `GRAPH_DEFAULT_DEPTH` | `4` | used when the client sends no depth |
+| `HUB_FANOUT_THRESHOLD` | `50` | hub pruning threshold |
+| `GRAPH_MAX_NODES` | `1200` | node ceiling in the payload |
+| `GRAPH_MAX_TIME_MS` | `15000` | time ceiling for the traversal aggregation |
 
-## Como rodar
+## How to run
 
 ```bash
-cp .env.example .env      # preencher MONGODB_URI e VOYAGE_API_KEY
+cp .env.example .env      # fill in MONGODB_URI and VOYAGE_API_KEY
 
-# dependências
+# dependencies
 python3 -m venv .venv && .venv/bin/pip install -r data-generator/requirements.txt
 python3 -m venv backend/venv && backend/venv/bin/pip install -r backend/requirements.txt
 (cd frontend && npm install)
 
-# dados (idempotente; ~20 min para o volume padrão)
+# data (idempotent; ~20 min for the default volume)
 bash data-generator/run_all.sh
-.venv/bin/python schema/search_indexes.py       # espera ficar READY
+.venv/bin/python schema/search_indexes.py       # waits until READY
 .venv/bin/python data-generator/embed_reasons.py
 
-# subir
-./start.sh                 # DEV=1 ./start.sh para HMR e --reload
+# start
+./start.sh                 # POV_DEV=1 ./start.sh for HMR and --reload
 ```
 
-## Ordem do trabalho
+`embed_reasons.py` runs **last**, after the rings are injected. Run it earlier and
+the ring transactions end up without vectors, and the semantic panel scoped to a
+network comes back almost empty.
 
-Dados, índices, queries em `mongosh`, backend, frontend, benchmarks. A topologia
-do dado sintético foi decidida por medição antes de existir uma linha de backend —
-sem isso, a demo mostra ou um clique inteiro na profundidade 1, ou metade da base
-na profundidade 2. Ver `docs/adr/0001-topologia-do-dado-sintetico.md`.
+## Order of work
+
+Data, indexes, `mongosh` queries, backend, frontend, benchmarks. The topology of
+the synthetic data was decided by measurement before a single line of backend
+existed — without that, the demo shows either one whole clique at depth 1, or half
+the database at depth 2. See `docs/adr/0001-topologia-do-dado-sintetico.md`.
 
 ## Endpoints
 
-| Método | Rota | Papel |
+| Method | Route | Role |
 |---|---|---|
-| GET | `/health/live` | liveness puro, não toca no banco |
-| GET | `/health` | checagem profunda: conexão, contagens, índices de busca, latência de referência do `$graphLookup`, estado do change stream |
-| GET | `/api/entry-points` | pontos de entrada da demo, do ground truth em `rings` |
-| GET | `/api/network/{person_id}` | Padrão B — expansão por arestas explícitas (`depth`, `edge_types`, `prune_hubs`) |
-| GET | `/api/network-by-device/{account_id}` | Padrão A — traversal por `device_id`, para comparação |
-| GET | `/api/hops` | distância em saltos entre duas pessoas |
-| GET | `/api/search/people` | Atlas Search com `fuzzy` + `autocomplete` |
-| POST | `/api/search/similar-reasons` | Vector Search sobre `reason_embedding`, agrupado por texto |
-| POST | `/api/investigation/flag` | transação ACID multi-documento |
-| POST | `/api/investigation/close/{case_id}` | fecha um caso |
-| POST | `/api/demo/reset` | volta o dataset ao estado pré-demo |
-| POST | `/api/demo/simulate-transaction` | injeta transação que toca a rede sinalizada |
-| POST | `/api/demo/link-accounts` | insere transações que fazem duas pessoas sem vínculo dividirem um dispositivo; quem cria a aresta é o change stream |
-| GET | `/api/connections/between` | existe aresta entre duas pessoas? usado para provar o antes e o depois |
-| GET | `/api/alerts/stream` | SSE alimentado pelo change stream |
-| GET | `/api/alerts/recent` | últimos alertas persistidos |
+| GET | `/health/live` | pure liveness, does not touch the database |
+| GET | `/health` | deep check: connection, counts, search indexes, reference `$graphLookup` latency, change stream state |
+| GET | `/api/entry-points` | demo entry points, from the ground truth in `rings` |
+| GET | `/api/network/{person_id}` | Pattern B — expansion over explicit edges (`depth`, `edge_types`, `prune_hubs`) |
+| GET | `/api/network-by-device/{account_id}` | Pattern A — traversal by `device_id`, for comparison |
+| GET | `/api/hops` | hop distance between two people |
+| GET | `/api/search/people` | Atlas Search with `fuzzy` + `autocomplete`, unscoped |
+| POST | `/api/search/people` | the same search, aware of the graph on screen: scopes and/or annotates each result |
+| POST | `/api/search/similar-reasons` | Vector Search over `reason_embedding`, grouped by text, optionally scoped to a ring |
+| POST | `/api/investigation/flag` | multi-document ACID transaction; refuses a second case over nodes already in an open one |
+| GET | `/api/investigation/case/{case_id}` | the open case with the before/after of the accounts the transaction changed |
+| GET | `/api/investigation/coaf/{case_id}` | structured suspicious-activity report, built from what the transaction already wrote |
+| POST | `/api/investigation/close/{case_id}` | closes a case |
+| POST | `/api/demo/reset` | returns the dataset to its pre-demo state |
+| POST | `/api/demo/simulate-transaction` | injects a transaction into the network on screen, with or without it being flagged |
+| POST | `/api/demo/link-accounts` | inserts transactions that make two unlinked people share a device; the change stream is what creates the edge |
+| GET | `/api/connections/between` | is there an edge between two people? used to prove the before and after |
+| GET | `/api/alerts/stream` | SSE fed by the change stream |
+| GET | `/api/alerts/recent` | the most recent persisted alerts |
 
-## Armadilhas encontradas na construção
+## Traps found while building
 
-Registradas porque custaram tempo e voltariam em qualquer POV parecida:
+Recorded because they cost time and would come back in any similar project:
 
-- **`shares_device` a partir das duas pontas da transação.** "A pagou B do celular
-  de A" não é dispositivo compartilhado. Incluir `to_account` na materialização
-  levou o grau médio da população limpa de ~1 para 8.6, e a profundidade 2 passou
-  a varrer metade da base.
-- **Gêmeo com erro de digitação colidindo com o anel seguinte.** Um off-by-one no
-  recrutamento fazia o gêmeo do anel *r* ser o líder do anel *r+1*, e o nome com
-  typo sobrescrevia o do líder — quebrando a correspondência que o passo 6 do
-  roteiro depende. O sintoma era sutil: a demo funcionava, só apontava para a
-  pessoa errada.
-- **Troca de caractere identidade no gerador de typo.** `"e" -> "e"` produzia um
-  gêmeo com nome exatamente igual, que o Atlas Search resolve por casamento
-  exato — o `fuzzy` nunca era exercitado.
-- **`connections` defasada em relação ao conjunto de membros.** Re-injetar as
-  redes sem rematerializar as arestas deixou ~3% dos membros sem aresta. Um deles
-  sorteado como ponto de entrada abre o grafo vazio na frente do cliente; por isso
-  `_entry_node` só escolhe nó com arestas confirmadas.
-- **`ObjectId` no payload do alerta.** O SSE serializa em JSON; `alerts._id` virou
-  string derivada do `_id` da transação, e a escrita virou upsert para que um
-  `update` na mesma transação não mate a thread do listener com chave duplicada.
-- **`depthField` devolve `NumberLong`.** Em `mongosh`, `long + 1` concatena string
-  em vez de somar. Os scripts usam `$toInt`.
+- **`shares_device` from both ends of the transaction.** "A paid B from A's phone"
+  is not a shared device. Including `to_account` in the materialisation took the
+  average degree of the clean population from ~1 to 8.6, and depth 2 started
+  sweeping half the database.
+- **The misspelled twin colliding with the next ring.** An off-by-one in
+  recruitment made the twin of ring *r* the leader of ring *r+1*, and the
+  misspelled name overwrote the leader's — breaking the correspondence step 7 of
+  the script depends on. The symptom was subtle: the demo worked, it just pointed
+  at the wrong person.
+- **Identity character swap in the typo generator.** `"e" -> "e"` produced a twin
+  with an exactly identical name, which Atlas Search resolves by exact match — the
+  `fuzzy` clause was never exercised.
+- **`connections` out of date with respect to the member set.** Re-injecting the
+  networks without re-materialising the edges left ~3% of members with no edge. One
+  of those picked as an entry point opens an empty graph in front of the customer;
+  that is why `_entry_nodes` only chooses nodes with confirmed edges.
+- **`ObjectId` in the alert payload.** SSE serialises to JSON; `alerts._id` became a
+  string derived from the transaction's `_id`, and the write became an upsert so
+  that an `update` on the same transaction does not kill the listener thread with a
+  duplicate key.
+- **`depthField` returns a `NumberLong`.** In `mongosh`, `long + 1` concatenates a
+  string instead of adding. The scripts use `$toInt`.
+- **A destination-key edge that turned the ring into a clique.** Spreading the
+  funnel across five fixed collectors made every payer of a key a clique member,
+  and cliques of six to seven collapsed the ring's diameter: entering from any node
+  brought 22 of 30 members at the first hop. Paying the branch parent instead makes
+  the payers of a key exactly the *siblings* of that branch — groups of four, and
+  the reveal by depth survives.
+- **A batch write drowning the change stream.** The listener reacted to *any* write
+  on `transactions`, so an embedding backfill (`update_many` per text) fired
+  thousands of edge materialisations and as many SSE events, with no device or
+  account having changed. It now acts only on `insert`, or on an `update` whose
+  `updatedFields` touches `device_id`, `from_account` or `to_account`. Worth
+  knowing before a demo: after a large batch, the listener spends time draining the
+  oplog from its stored resume token, and new events only appear once it catches up.
 
-## Testes
+## Tests
 
 ```bash
-.venv/bin/python tests/test_resilience.py           # suíte hostil completa
-.venv/bin/python tests/test_resilience.py --quick   # sem change stream e carga
-.venv/bin/python tests/scale_graph.py --build       # grafo de escala (demorado)
-.venv/bin/python tests/scale_graph.py --measure     # mede o traversal em escala
-.venv/bin/python tests/index_tuning.py              # ganho do índice composto
-mongosh "$MONGODB_URI" queries/08_explain_traversal.js   # prova de IXSCAN
+.venv/bin/python tests/test_resilience.py           # full hostile suite
+.venv/bin/python tests/test_resilience.py --quick   # without change stream and load
+.venv/bin/python tests/scale_graph.py --build       # scale graph (slow)
+.venv/bin/python tests/scale_graph.py --measure     # measures traversal at scale
+.venv/bin/python tests/index_tuning.py              # gain from the compound index
+mongosh "$MONGODB_URI" queries/08_explain_traversal.js   # IXSCAN proof
 ```
 
-`tests/test_resilience.py` não é teste de unidade. Cada caso corresponde a uma
-forma real de a POV falhar na frente de um cliente, e o critério de aprovação é
-**degradar com mensagem clara**: nunca 500, nunca travar, nunca devolver dado
-inconsistente. Os blocos:
+`tests/test_resilience.py` is not a unit test. Each case corresponds to a real way
+this project could fail in front of a customer, and the pass criterion is to
+**degrade with a clear message**: never a 500, never a hang, never inconsistent
+data. The blocks:
 
-| Bloco | O que tenta quebrar |
+| Block | What it tries to break |
 |---|---|
-| Entradas hostis | id gigante, id inexistente, profundidade 999 e negativa, tipo de aresta inventado, operador Mongo no `_id`, busca vazia e de 5000 caracteres, metacaracteres de regex, `limit` fora de faixa, `person_ids` com tipo errado |
-| Consistência do payload | aresta apontando para nó ausente, contagem divergente, mais de uma raiz, monotonicidade da profundidade, poda que aumenta alcance, não-determinismo |
-| Transação ACID | marcação repetida, id inexistente, acima do teto, **8 transações concorrentes sobre os mesmos documentos** |
-| Plano de execução | ausência dos índices de traversal e COLLSCAN disfarçado |
-| Change Streams | rajada de 12 transações simultâneas, perda de evento, morte do listener |
-| Manutenção de aresta | vínculo materializado em tempo real, duplicação por reprocessamento |
-| Manutenção de aresta | vínculo criado ao vivo pelo change stream, duplicação por reprocessamento |
-| Carga | 40 expansões concorrentes com 10 trabalhadores, p50/p95 |
+| Hostile input | giant id, non-existent id, depth 999 and negative, invented edge type, Mongo operator in `_id`, empty and 5000-character searches, regex metacharacters, out-of-range `limit`, wrongly typed `person_ids` |
+| Payload consistency | edge pointing at a missing node, divergent counts, more than one root, depth monotonicity, pruning that increases reach, non-determinism |
+| ACID transaction | repeated flagging, non-existent id, above the ceiling, **8 concurrent transactions over the same documents** |
+| Execution plan | missing traversal indexes and disguised COLLSCAN |
+| Change Streams | burst of 12 simultaneous transactions, lost event, listener death |
+| Edge maintenance | link created live by the change stream, duplication on reprocessing |
+| Load | 40 concurrent expansions with 10 workers, p50/p95 |
 
-Três bugs reais saíram daí, todos corrigidos:
+Real bugs that came out of it, all fixed:
 
-- `limit: -1` chegava ao `$vectorSearch` e virava 500;
-- `person_ids` como string era iterado caractere a caractere até a transação
-  abortar com 409;
-- o par de pessoas de `link-accounts` era fixo, então a **segunda apresentação
-  seguida** falhava: as duas já estavam ligadas pela primeira. Agora é sorteado, e
-  `POST /api/demo/reset` remove as arestas criadas ao vivo.
+- `limit: -1` reached `$vectorSearch` and became a 500;
+- `person_ids` as a string was iterated character by character until the
+  transaction aborted with a 409;
+- the pair of people in `link-accounts` was fixed, so the **second consecutive
+  presentation** failed: the two were already linked by the first. It is now drawn
+  at random, and `POST /api/demo/reset` removes the edges created live;
+- flagging twice overwrote `case_id` on the accounts and left the first case as a
+  shell with `status: "open"` and zero accounts. The endpoint now refuses, and
+  returns the open `case_id` so the screen can offer to close it.
 
-Os dois primeiros viraram validação de schema (`pydantic`) em vez de checagem
-manual.
+The first two became schema validation (`pydantic`) instead of manual checks.
 
-`tests/scale_graph.py` e `tests/index_tuning.py` não testam: medem. O primeiro
-constrói um grafo de 2,4 milhões de arestas para descobrir onde o traversal deixa
-de caber; o segundo compara `{from: 1}` com `{from: 1, weight: 1}` no caminho com
-poda. Os dois escrevem JSON ao lado, e os números vão para
-`queries/benchmarks.md`.
+`tests/scale_graph.py` and `tests/index_tuning.py` do not test: they measure. The
+first builds a 2.4 million edge graph to find where the traversal stops fitting;
+the second compares `{from: 1}` with `{from: 1, weight: 1}` on the pruned path.
+Both write JSON alongside, and the numbers go into `queries/benchmarks.md`.

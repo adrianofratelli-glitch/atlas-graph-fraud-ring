@@ -9,6 +9,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,12 +55,31 @@ class SimilarReasonsIn(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
     limit: int = Field(default=8, ge=1, le=50)
     ring_only: bool = False
+    # Escopo do painel: "rede" restringe às redes que estão na tela, "base" varre
+    # tudo. `ring_ids` é filtro do índice vetorial, então o corte é no ANN.
+    scope: Literal["rede", "base"] = "rede"
+    ring_ids: list[str] | None = Field(default=None, max_length=50)
 
     @field_validator("text")
     @classmethod
     def nao_so_espaco(cls, v: str) -> str:
         if not v.strip():
-            raise ValueError("`text` não pode ser só espaço")
+            raise ValueError("`text` cannot be whitespace only")
+        return v
+
+
+class SearchPeopleIn(BaseModel):
+    q: str = Field(min_length=1, max_length=200)
+    limit: int = Field(default=10, ge=1, le=50)
+    scope: Literal["rede", "base"] = "base"
+    person_ids: list[str] | None = Field(default=None, max_length=2000)
+    ring_ids: list[str] | None = Field(default=None, max_length=50)
+
+    @field_validator("q")
+    @classmethod
+    def q_nao_so_espaco(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("`q` cannot be whitespace only")
         return v
 
 
@@ -72,6 +92,9 @@ class FlagIn(BaseModel):
 class SimulateIn(BaseModel):
     account_id: str | None = None
     amount: float | None = Field(default=None, ge=0, le=10_000_000)
+    # A rede que está na tela. Permite injetar a transação **sem** nada marcado,
+    # que é a metade "não alerta" do teste A/B do change stream.
+    person_ids: list[str] | None = Field(default=None, max_length=5000)
 
 
 # --------------------------------------------------------------------------- health
@@ -145,13 +168,19 @@ def network(
     edge_types: str | None = Query(None, description="lista separada por vírgula"),
     prune_hubs: bool = Query(True),
 ):
-    types = [t.strip() for t in edge_types.split(",") if t.strip()] if edge_types else None
+    # `edge_types` ausente = todos os tipos. `edge_types=` presente e vazio =
+    # nenhum tipo marcado, que precisa devolver grafo vazio.
+    types = (
+        [t.strip() for t in edge_types.split(",") if t.strip()]
+        if edge_types is not None
+        else None
+    )
     if types and not set(types) <= set(graph.ALL_EDGE_TYPES):
-        raise HTTPException(400, f"tipos válidos: {graph.ALL_EDGE_TYPES}")
+        raise HTTPException(400, f"valid edge types: {graph.ALL_EDGE_TYPES}")
     try:
         result = graph.expand_network(person_id, depth=depth, edge_types=types, prune_hubs=prune_hubs)
     except PyMongoError as exc:
-        raise HTTPException(503, f"MongoDB indisponível: {exc}") from exc
+        raise HTTPException(503, f"MongoDB unavailable: {exc}") from exc
     if result.get("too_large"):
         # Não é erro do cliente nem falha do servidor: é o traversal pedido não
         # caber. A resposta carrega o que fazer a respeito.
@@ -166,7 +195,7 @@ def network(
             },
         )
     if not result.get("found"):
-        raise HTTPException(404, f"pessoa `{person_id}` não encontrada")
+        raise HTTPException(404, f"person `{person_id}` not found")
     return result
 
 
@@ -176,9 +205,9 @@ def network_by_device(account_id: str, depth: int | None = Query(None)):
     try:
         result = graph.expand_by_shared_device(account_id, depth=depth)
     except PyMongoError as exc:
-        raise HTTPException(503, f"MongoDB indisponível: {exc}") from exc
+        raise HTTPException(503, f"MongoDB unavailable: {exc}") from exc
     if not result.get("found"):
-        raise HTTPException(404, f"nenhuma transação para a conta `{account_id}`")
+        raise HTTPException(404, f"no transaction for account `{account_id}`")
     return result
 
 
@@ -190,10 +219,28 @@ def hops(source: str, target: str, max_depth: int | None = Query(None)):
 # --------------------------------------------------------------------------- busca
 @app.get("/api/search/people")
 def search_people(q: str, limit: int = Query(10, le=50)):
+    """Busca sem escopo. Mantida para `mongosh`, curl e os testes."""
     if not q.strip():
-        raise HTTPException(400, "parâmetro `q` vazio")
+        raise HTTPException(400, "empty `q` parameter")
     try:
         return search.resolve_entity(q, limit=limit)
+    except search.IndexUnavailable as exc:
+        raise HTTPException(503, detail={"feature": "atlas_search", "index": exc.index_name, "status": exc.status}) from exc
+
+
+@app.post("/api/search/people")
+def search_people_scoped(payload: SearchPeopleIn):
+    """Busca ciente do grafo na tela: escopa e/ou anota cada resultado."""
+    if not payload.q.strip():
+        raise HTTPException(400, "empty `q` parameter")
+    try:
+        return search.resolve_entity(
+            payload.q.strip(),
+            limit=payload.limit,
+            person_ids=payload.person_ids,
+            ring_ids=payload.ring_ids,
+            scope=payload.scope,
+        )
     except search.IndexUnavailable as exc:
         raise HTTPException(503, detail={"feature": "atlas_search", "index": exc.index_name, "status": exc.status}) from exc
 
@@ -201,7 +248,13 @@ def search_people(q: str, limit: int = Query(10, le=50)):
 @app.post("/api/search/similar-reasons")
 def similar_reasons(payload: SimilarReasonsIn):
     try:
-        return search.similar_reasons(payload.text.strip(), limit=payload.limit, ring_only=payload.ring_only)
+        return search.similar_reasons(
+            payload.text.strip(),
+            limit=payload.limit,
+            ring_only=payload.ring_only,
+            ring_ids=payload.ring_ids,
+            scope=payload.scope,
+        )
     except search.IndexUnavailable as exc:
         raise HTTPException(503, detail={"feature": "vector_search", "index": exc.index_name, "status": exc.status}) from exc
 
@@ -213,13 +266,45 @@ def flag(payload: FlagIn):
         payload.person_ids, reason=payload.reason, analyst=payload.analyst
     )
     if not result.get("ok"):
-        raise HTTPException(409, result.get("error", "transação abortada"))
+        # O `case_id` vai junto: a tela precisa poder oferecer "encerrar aquele
+        # caso" em vez de só dizer que não deu.
+        raise HTTPException(
+            409,
+            detail={
+                "error": result.get("error", "transaction aborted"),
+                "case_id": result.get("case_id"),
+                "already_open": result.get("already_open", False),
+            },
+        )
     return result
 
 
 @app.post("/api/investigation/close/{case_id}")
 def close(case_id: str):
     result = investigation.close_case(case_id)
+    if not result.get("ok"):
+        raise HTTPException(404, result.get("error"))
+    return result
+
+
+@app.get("/api/investigation/case/{case_id}")
+def case(case_id: str):
+    """O caso aberto, com o antes/depois das contas que a transação ACID mudou."""
+    result = investigation.case_detail(case_id)
+    if not result.get("ok"):
+        raise HTTPException(404, result.get("error"))
+    return result
+
+
+@app.get("/api/investigation/coaf/{case_id}")
+def coaf(case_id: str):
+    """Comunicação de operação suspeita, montada do que a transação já gravou.
+
+    Circular BCB 3.978/2020 (COAF, 24h), Resolução BCB 6/2023 (MED) e o registro
+    de tratamento da LGPD. Nada é integrado: o ponto é que o documento sai inteiro
+    da auditoria que commitou junto com o bloqueio.
+    """
+    result = investigation.coaf_report(case_id)
     if not result.get("ok"):
         raise HTTPException(404, result.get("error"))
     return result
@@ -233,7 +318,9 @@ def reset():
 # --------------------------------------------------------------------------- tempo real
 @app.post("/api/demo/simulate-transaction")
 def simulate(payload: SimulateIn = SimulateIn()):
-    result = demo.simulate_transaction(payload.account_id, payload.amount)
+    result = demo.simulate_transaction(
+        payload.account_id, payload.amount, person_ids=payload.person_ids
+    )
     if not result.get("ok"):
         raise HTTPException(409, result.get("error"))
     return result

@@ -56,29 +56,53 @@ def _entry_nodes(db, rings: list[dict[str, Any]]) -> dict[str, str]:
     )
     ring_of = {m["_id"]: m["ring_id"] for m in membros}
 
+    # Ordena por **variedade de vínculo** antes de grau.
+    #
+    # Grau sozinho escolhia um nó que tinha só arestas de endereço. Na tela isso
+    # quebra o passo dos toggles: o apresentador desmarca "Endereço" para mostrar
+    # que o vínculo real é o dispositivo, e o grafo desaba para um nó só — parece
+    # bug, não argumento. Um ponto de entrada que toca os três tipos é o que faz
+    # ligar e desligar cada aresta dizer alguma coisa.
     graus = db.connections.aggregate(
         [
             {"$match": {"from": {"$in": list(ring_of)}}},
-            {"$group": {"_id": "$from", "grau": {"$sum": 1}}},
-            {"$sort": {"grau": -1}},
+            {"$group": {"_id": "$from", "grau": {"$sum": 1}, "tipos": {"$addToSet": "$type"}}},
+            {"$set": {"variedade": {"$size": "$tipos"}}},
+            # Ordem do fallback: variedade de vínculo primeiro, grau depois.
+            #
+            # Nenhum dos dois sozinho serve. Só grau alto escolhe o coletor do
+            # funil, e entrar por ele traz os 30 membros já na profundidade 1 —
+            # a revelação por saltos, que é a espinha da demo, deixa de existir.
+            # Só grau baixo escolhe uma folha, e aí o anel só fecha no salto 5.
+            #
+            # Este ramo só decide quando o líder não serve; o caso normal é o
+            # líder, que é a raiz da árvore e dá a curva mais legível.
+            {"$sort": {"variedade": -1, "grau": -1}},
         ],
         allowDiskUse=True,
     )
     melhor: dict[str, str] = {}
+    variedade_de: dict[str, int] = {}
     com_arestas: set[str] = set()
     for g in graus:
         com_arestas.add(g["_id"])
+        variedade_de[g["_id"]] = g["variedade"]
         rid = ring_of.get(g["_id"])
-        if rid and rid not in melhor:  # já vem ordenado por grau desc
+        if rid and rid not in melhor:  # já vem ordenado por variedade, depois grau
             melhor[rid] = g["_id"]
 
     escolha: dict[str, str] = {}
     for r in rings:
         rid = r["ring_id"]
+        candidato = melhor.get(rid)
+        # O líder é a raiz da árvore, e é dele que a revelação por profundidade
+        # fica legível: poucos vizinhos diretos, o anel fechando alguns saltos
+        # depois. Ele só é trocado se não tiver aresta materializada nenhuma —
+        # entrar por um nó isolado abriria o grafo vazio na frente do cliente.
         if r["leader"] in com_arestas:
             escolha[rid] = r["leader"]
-        elif rid in melhor:
-            escolha[rid] = melhor[rid]
+        elif candidato:
+            escolha[rid] = candidato
     return escolha
 
 
@@ -175,12 +199,12 @@ def link_two_accounts(device_id: str | None = None) -> dict[str, Any]:
         if a and b and a["_id"] != b["_id"] and db.connections.count_documents({"from": a["_id"], "to": b["_id"]}) == 0:
             break
     else:
-        return {"ok": False, "error": "não achei um par ainda sem vínculo"}
+        return {"ok": False, "error": "could not find a pair that is still unlinked"}
 
     conta_a = db.accounts.find_one({"person_id": a["_id"]}, {"person_id": 1})
     conta_b = db.accounts.find_one({"person_id": b["_id"]}, {"person_id": 1})
     if not conta_a or not conta_b:
-        return {"ok": False, "error": "contas não encontradas"}
+        return {"ok": False, "error": "accounts not found"}
 
     ja_ligadas = False  # garantido pelo laço acima
     device = device_id or f"device_demo_{uuid.uuid4().hex[:10]}"
@@ -215,17 +239,48 @@ def link_two_accounts(device_id: str | None = None) -> dict[str, Any]:
     }
 
 
-def simulate_transaction(account_id: str | None = None, amount: float | None = None) -> dict[str, Any]:
-    """Injeta uma transação que toca a rede sinalizada, para acordar o change stream.
+def simulate_transaction(
+    account_id: str | None = None,
+    amount: float | None = None,
+    person_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Injeta uma transação que toca a rede, para acordar o change stream.
+
+    Funciona **com e sem** a rede marcada, de propósito. É o A/B que prova que o
+    alerta consulta o estado de verdade em vez de disparar sozinho: a mesma
+    transação, na mesma rede, alerta depois de marcar e não alerta antes. Antes
+    esta função recusava quando nada estava sob investigação, e esse contraste era
+    impossível de mostrar.
+
+    `expect_alert` diz o que a tela deve esperar, para que "nenhum alerta" apareça
+    como resultado previsto e não como uma demo que travou.
 
     Marcada com `simulated: True` para que `reset_all()` consiga limpá-la.
     """
     db = get_db()
     if not account_id:
-        flagged = db.accounts.find_one({"status": "under_investigation"}, {"person_id": 1})
-        if not flagged:
-            return {"ok": False, "error": "nenhuma conta sob investigação — rode o passo 7 antes"}
-        account_id = flagged["_id"]
+        # Quando a tela informa a rede, a busca fica **restrita a ela**.
+        #
+        # Sem essa restrição, o A/B mente: depois de encerrar o caso, um caso
+        # aberto de uma apresentação anterior — em outra rede — seria encontrado,
+        # a transação cairia lá e o alerta dispararia mesmo com a rede da tela
+        # já liberada. Aconteceu no primeiro teste ponta a ponta.
+        escopo = {"person_id": {"$in": person_ids}} if person_ids else {}
+        flagged = db.accounts.find_one({**escopo, "status": "under_investigation"}, {"person_id": 1})
+        if flagged:
+            account_id = flagged["_id"]
+        elif person_ids:
+            # Rede na tela sem nada marcado: injeta nela mesma, para que o
+            # antes/depois seja sobre a MESMA rede e portanto comparável.
+            alvo = db.accounts.find_one({"person_id": {"$in": person_ids}}, {"person_id": 1})
+            if not alvo:
+                return {"ok": False, "error": "no account found for the network on screen"}
+            account_id = alvo["_id"]
+        else:
+            return {"ok": False, "error": "no account under investigation and no network on screen"}
+
+    destino = db.accounts.find_one({"_id": account_id}, {"status": 1})
+    expect_alert = bool(destino and destino.get("status") == "under_investigation")
 
     counterpart = db.accounts.find_one({"status": "active", "ring_id": None}, {"person_id": 1})
     rng = random.Random()
@@ -241,4 +296,14 @@ def simulate_transaction(account_id: str | None = None, amount: float | None = N
         "simulated": True,
     }
     db.transactions.insert_one(doc)
-    return {"ok": True, "transaction": {**doc, "timestamp": doc["timestamp"].isoformat()}}
+    return {
+        "ok": True,
+        "expect_alert": expect_alert,
+        "explanation": (
+            "the destination account is under investigation: the listener should publish an alert"
+            if expect_alert
+            else "no account in the network is under investigation: the listener sees the transaction "
+            "and does not alert — that is the correct outcome, not a failure"
+        ),
+        "transaction": {**doc, "timestamp": doc["timestamp"].isoformat()},
+    }

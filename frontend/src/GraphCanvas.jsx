@@ -6,7 +6,7 @@ import { t } from './theme'
 const EDGE_COLOR = {
   shares_device: '#0498ec',
   shares_address: '#ffc010',
-  shares_pix_key: '#00ed64',
+  same_pix_counterparty: '#00ed64',
 }
 
 // Atenuação do que não é vizinho. Não é decoração: é o padrão de "revelar
@@ -15,25 +15,42 @@ const EDGE_COLOR = {
 const DIM = 'rgba(136,147,151,0.16)'
 const DIM_TEXT = 'rgba(136,147,151,0.35)'
 
-function nodeStyle(n, { dimmed = false, emphasized = false } = {}) {
+function nodeStyle(n, { dimmed = false, emphasized = false, pinned = false, flagged = false } = {}) {
   const isRing = Boolean(n.ring_id)
+  // Conta bloqueada vira borda tracejada. É o efeito da transação ACID aparecendo
+  // no grafo: sem isso, marcar a rede não muda nada na tela e a ação mais forte
+  // da demo passa despercebida.
+  const dashes = flagged ? { borderDashes: [6, 4] } : { borderDashes: false }
   if (dimmed) {
     return {
       color: { background: 'rgba(28,45,56,0.45)', border: DIM },
       font: { color: DIM_TEXT, size: n.is_root ? 15 : 12 },
       borderWidth: 1,
+      shapeProperties: dashes,
     }
   }
   // O nó em foco mantém a cor do seu tipo e ganha borda azul: trocar o fundo por
   // azul apagaria a informação de "está numa rede", que é o que o analista está
   // lendo. O realce muda a moldura, não a identidade.
   const bg = n.is_root ? t.accent : isRing ? 'rgba(255,105,96,.55)' : t.bgCard
+  // O nó fixado tem que ser achável a olho: o analista clicou nele e depois olha
+  // para o painel. Sem uma marca permanente, ao voltar os olhos para o grafo ele
+  // não sabe mais de onde veio o que está lendo.
+  const borda = pinned
+    ? '#ffffff'
+    : emphasized
+      ? t.link
+      : n.is_root
+        ? '#00c853'
+        : isRing
+          ? t.danger
+          : t.borderSubtle
   return {
     color: {
       background: bg,
-      border: emphasized ? t.link : n.is_root ? '#00c853' : isRing ? t.danger : t.borderSubtle,
-      highlight: { background: bg, border: t.link },
-      hover: { background: bg, border: t.link },
+      border: borda,
+      highlight: { background: bg, border: pinned ? '#ffffff' : t.link },
+      hover: { background: bg, border: pinned ? '#ffffff' : t.link },
     },
     font: {
       // O rótulo fica FORA do nó, sobre o fundo escuro — a cor de contraste do
@@ -41,18 +58,24 @@ function nodeStyle(n, { dimmed = false, emphasized = false } = {}) {
       color: n.is_root ? t.accent : isRing ? t.textPri : t.textMuted,
       size: n.is_root ? 15 : 12,
     },
-    borderWidth: emphasized ? 3 : n.is_root ? 3 : isRing ? 2.5 : 1,
+    borderWidth: pinned ? 4 : emphasized ? 3 : n.is_root ? 3 : isRing ? 2.5 : 1,
+    shapeProperties: dashes,
   }
 }
 
-export default function GraphCanvas({ data, onSelect, onHover }) {
+export default function GraphCanvas({ data, pinned, onSelect, onHover }) {
   const holder = useRef(null)
   const net = useRef(null)
   const nodesDS = useRef(null)
   const edgesDS = useRef(null)
   const adjacency = useRef(new Map())
   const freezeTimer = useRef(null)
+  // `pinned` vive num ref, não nas dependências do efeito: mudá-lo só repinta os
+  // nós. Colocá-lo na dependência recriaria a Network a cada clique, jogando fora
+  // o layout que a física acabou de estabilizar.
+  const pinnedRef = useRef(pinned)
   const [settling, setSettling] = useState(false)
+  const restoreRef = useRef(null)
 
   // A aresta é bidirecional na coleção; desenhar as duas vias polui o canvas.
   const unique = useMemo(() => {
@@ -65,17 +88,31 @@ export default function GraphCanvas({ data, onSelect, onHover }) {
     })
   }, [data])
 
+  useEffect(() => {
+    pinnedRef.current = pinned
+    restoreRef.current?.()
+  }, [pinned])
+
   const restore = useCallback(() => {
     if (!nodesDS.current) return
-    nodesDS.current.update((data?.nodes ?? []).map((n) => ({ id: n.id, ...nodeStyle(n) })))
+    nodesDS.current.update(
+      (data?.nodes ?? []).map((n) => ({
+        id: n.id,
+        ...nodeStyle(n, { pinned: n.id === pinnedRef.current, flagged: n.flagged }),
+      }))
+    )
     edgesDS.current.update(
       edgesDS.current.get().map((e) => ({
         id: e.id,
-        color: { color: EDGE_COLOR[e.relType] ?? t.borderSubtle, opacity: 0.55 },
-        width: e.relType === 'shares_device' ? 1.6 : 1,
+        color: { color: EDGE_COLOR[e.relType] ?? t.borderSubtle, opacity: 0.75 },
+        width: e.relType === 'shares_device' ? 3 : 2.4,
       }))
     )
   }, [data])
+
+  // Ponte entre o efeito acima (que roda antes de `restore` existir) e a função
+  // memoizada, para o repintar do fixado não depender da ordem de declaração.
+  restoreRef.current = restore
 
   const focus = useCallback(
     (nodeId) => {
@@ -84,7 +121,16 @@ export default function GraphCanvas({ data, onSelect, onHover }) {
       nodesDS.current.update(
         (data?.nodes ?? []).map((n) => {
           const near = n.id === nodeId || neighbours.has(n.id)
-          return { id: n.id, ...nodeStyle(n, { dimmed: !near, emphasized: n.id === nodeId }) }
+          return {
+            id: n.id,
+            ...nodeStyle(n, {
+              dimmed: !near,
+              emphasized: n.id === nodeId,
+              // O fixado nunca perde a marca, nem quando o hover atenua o resto.
+              pinned: n.id === pinnedRef.current,
+              flagged: n.flagged,
+            }),
+          }
         })
       )
       edgesDS.current.update(
@@ -95,7 +141,7 @@ export default function GraphCanvas({ data, onSelect, onHover }) {
             color: touches
               ? { color: EDGE_COLOR[e.relType] ?? t.borderSubtle, opacity: 1 }
               : { color: DIM, opacity: 0.25 },
-            width: touches ? 2.4 : 1,
+            width: touches ? 4.5 : 1.6,
           }
         })
       )
@@ -128,7 +174,7 @@ export default function GraphCanvas({ data, onSelect, onHover }) {
           shadow: n.ring_id
             ? { enabled: true, color: 'rgba(255,105,96,.45)', size: 14, x: 0, y: 0 }
             : false,
-          ...nodeStyle(n),
+          ...nodeStyle(n, { pinned: n.id === pinnedRef.current, flagged: n.flagged }),
         }
       })
     )
@@ -138,8 +184,8 @@ export default function GraphCanvas({ data, onSelect, onHover }) {
         from: e.from,
         to: e.to,
         relType: e.type,
-        color: { color: EDGE_COLOR[e.type] ?? t.borderSubtle, opacity: 0.55 },
-        width: e.type === 'shares_device' ? 1.6 : 1,
+        color: { color: EDGE_COLOR[e.type] ?? t.borderSubtle, opacity: 0.75 },
+        width: e.type === 'shares_device' ? 3 : 2.4,
       }))
     )
 
@@ -262,19 +308,19 @@ export default function GraphCanvas({ data, onSelect, onHover }) {
 
   return (
     <div className="canvas">
-      <div className="canvas-surface" ref={holder} aria-label="Grafo da rede investigada" role="img" />
+      <div className="canvas-surface" ref={holder} aria-label="Graph of the investigated network" role="img" />
 
       {/* Depois de arrastar ou dar zoom, o apresentador precisa de um jeito de
           voltar ao enquadramento sem recarregar a tela. */}
       <div className="canvas-controls">
-        <button type="button" onClick={() => zoom(1.25)} aria-label="Aproximar">+</button>
-        <button type="button" onClick={() => zoom(0.8)} aria-label="Afastar">−</button>
-        <button type="button" onClick={fit} aria-label="Enquadrar o grafo inteiro">⤢</button>
+        <button type="button" onClick={() => zoom(1.25)} aria-label="Zoom in">+</button>
+        <button type="button" onClick={() => zoom(0.8)} aria-label="Zoom out">−</button>
+        <button type="button" onClick={fit} aria-label="Fit the whole graph">⤢</button>
       </div>
 
       {settling && (
         <div className="canvas-settling" role="status">
-          organizando o layout…
+          laying out the graph…
         </div>
       )}
     </div>

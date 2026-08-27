@@ -25,7 +25,7 @@ SEED = 20260826
 NOW = datetime(2026, 8, 26, tzinfo=timezone.utc)
 WINDOW_DAYS = 180
 
-ACCOUNT_TYPES = ["checking", "credit_card", "pix_key"]
+ACCOUNT_TYPES = ["checking", "credit_card", "savings"]
 
 # Hubs deliberados. Um endereço de agência bancária compartilhado por milhares de
 # contas legítimas é o falso positivo clássico que a poda por fan-out resolve —
@@ -92,6 +92,32 @@ def build_hub_addresses() -> list[dict]:
     ]
 
 
+# --- Chave PIX -------------------------------------------------------------
+#
+# Regra do DICT (Resolução BCB nº 1/2020): **uma chave endereça exatamente uma
+# conta transacional por vez**. Duas contas não podem carregar a mesma chave — o
+# DICT rejeita o cadastro. Por isso a chave mora em `accounts`, é única, e
+# `shares_pix_key` (duas pessoas com a mesma chave) não existe neste modelo.
+#
+# O vínculo real de fraude é o outro lado: **contas distintas que pagam para a
+# MESMA chave de destino**. É a assinatura do funil de mulas — a conta de
+# arrecadação no fim da cadeia. Daí a aresta `same_pix_counterparty`, construída
+# a partir de `transactions.to_pix_key`.
+#
+# Tipos de chave e o limite de cada um:
+#   CPF   — uma só por pessoa, numa única conta. Aqui, sempre a conta k=0.
+#   EVP   — chave aleatória, até 5 por conta PF. Aqui, uma por conta k>0.
+def pix_key_for(person_idx: int, k: int) -> str:
+    """Chave PIX de uma conta. Única por conta, como o DICT exige."""
+    if k == 0:
+        return f"{person_idx:011d}"  # chave CPF, uma por pessoa
+    return det_id("pix", person_idx, k)  # chave aleatória (EVP)
+
+
+def pix_key_type(k: int) -> str:
+    return "cpf" if k == 0 else "evp"
+
+
 def gen_devices(rng: random.Random, account_keys: list[tuple[int, int]]):
     """Um dispositivo por conta, mais os hubs (terminal público, quiosque)."""
     for i in range(HUB_DEVICE_COUNT):
@@ -119,6 +145,10 @@ def gen_accounts(rng: random.Random, n_people: int):
                 "_id": det_id("account", i, k),
                 "person_id": person_id,
                 "account_type": ACCOUNT_TYPES[k % len(ACCOUNT_TYPES)],
+                # Chave única por conta: é o que o DICT garante e o que impede a
+                # aresta "duas pessoas, mesma chave" de existir.
+                "pix_key": pix_key_for(i, k),
+                "pix_key_type": pix_key_type(k),
                 "opened_at": NOW - timedelta(days=rng.randint(30, 3 * 365)),
                 "status": "active",
                 "ring_id": None,
@@ -157,6 +187,8 @@ def gen_transactions(
             "_id": det_id("txn", i),
             "from_account": account_ids[a],
             "to_account": account_ids[b],
+            # Chave de destino: é sobre ela que `same_pix_counterparty` agrupa.
+            "to_pix_key": pix_key_for(*account_keys[b]),
             "device_id": device,
             "amount": round(rng.lognormvariate(5.2, 1.1), 2),
             "reason_text": rng.choice(ALL_LEGIT),

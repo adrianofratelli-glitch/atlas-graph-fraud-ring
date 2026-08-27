@@ -19,14 +19,28 @@ const specs = [
   ["transactions", { to_account: 1 }, {}, "entrada do grafo + consulta operacional"],
   ["transactions", { timestamp: -1 }, {}, "extrato recente da conta"],
   ["transactions", { ring_id: 1 }, { sparse: true }, "ground truth"],
+  ["transactions", { to_pix_key: 1 }, { sparse: true }, "materialização de same_pix_counterparty"],
+  // Sem ele, `POST /api/demo/reset` varre as 600 mil transações para achar as
+  // poucas simuladas e estoura o tempo — o reset falhava no meio da demo.
+  ["transactions", { simulated: 1 }, { sparse: true }, "reset da demo remove só as transações simuladas"],
+  // `embed_reasons.py` faz um `update_many` por texto distinto, filtrando por
+  // `reason_embedding: {$exists: false}`. Sem este índice são 33 COLLSCANs de
+  // 600 mil documentos, e o backfill leva dezenas de minutos.
+  ["transactions", { reason_text: 1, reason_embedding: 1 }, {}, "backfill de embeddings sem COLLSCAN"],
 
   // --- entidades ---
   ["accounts", { person_id: 1 }, {}, "conta -> pessoa"],
   ["accounts", { ring_id: 1 }, { sparse: true }, "validação de ground truth na demo"],
   ["accounts", { status: 1 }, {}, "listar contas sob investigação"],
+  ["accounts", { case_id: 1 }, { sparse: true }, "contas de um caso aberto"],
+  // Único por conta, e é o DICT que exige isso: uma chave endereça uma conta só
+  // (Resolução BCB nº 1/2020). O índice único é a guarda contra o modelo errado
+  // voltar por descuido — se alguém tentar dar a mesma chave a duas contas, a
+  // escrita falha em vez de gerar uma aresta que não existe na vida real.
+  ["accounts", { pix_key: 1 }, { unique: true, sparse: true }, "chave PIX única por conta (DICT)"],
   ["people", { ring_id: 1 }, { sparse: true }, "ground truth"],
   ["people", { "addresses.address_id": 1 }, {}, "materialização de shares_address"],
-  ["people", { pix_key: 1 }, { sparse: true }, "materialização de shares_pix_key"],
+
   ["people", { seed_index: 1 }, {}, "seleção determinística de casos na demo"],
 ];
 

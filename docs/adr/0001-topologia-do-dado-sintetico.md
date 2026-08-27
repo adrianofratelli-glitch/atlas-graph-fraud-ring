@@ -1,59 +1,85 @@
-# ADR 0001 — Topologia do dado sintético
+# ADR 0001 — Topology of the synthetic data
 
-**Status:** aceito · **Data:** 2026-08-26
+**Status:** accepted · **Date:** 2026-08-26 (revised 2026-08-27)
 
-## Contexto
+## Context
 
-A demo depende de o grafo crescer visivelmente entre a profundidade 1 e a 4. Isso
-não é uma propriedade do `$graphLookup`: é uma propriedade do dado. Três
-topologias foram testadas e medidas antes de o backend existir.
+The demo depends on the graph growing visibly between depth 1 and depth 4. That is
+not a property of `$graphLookup`: it is a property of the data. Three topologies
+were tested and measured before the backend existed.
 
-## Alternativas medidas
+## Alternatives measured
 
-| Topologia | Resultado medido | Por que foi descartada |
+| Topology | Measured result | Why it was discarded |
 |---|---|---|
-| Endereço único para toda a rede | rede de 20 completa na profundidade 1 (422 arestas, 20 nós) | vira um clique; não sobra nada para o passo 3 do roteiro mostrar |
-| Cadeia (cada membro ligado ao seguinte) | precisaria de profundidade 19 para revelar uma rede de 20 | acima do cap do backend, e o crescimento é linear demais para ser legível |
-| Atributo compartilhado sorteado na população limpa | grau médio 8.6; profundidade 2 alcançava 1096 de 2000 nós | a rede de fraude se perde no ruído; o grafo fica ilegível |
+| One address for the whole network | a 20-member ring complete at depth 1 (422 edges, 20 nodes) | it becomes a clique; nothing is left for step 3 of the script to show |
+| Chain (each member linked to the next) | would need depth 19 to reveal a 20-member ring | above the backend cap, and the growth is too linear to read |
+| Shared attribute drawn at random in the clean population | average degree 8.6; depth 2 reached 1,096 of 2,000 nodes | the fraud ring is lost in the noise; the graph becomes unreadable |
 
-## Decisão
+## Decision
 
-Árvore de fator de ramificação **2**, com os atributos compartilhados seguindo a
-mesma árvore e nunca o anel inteiro:
+A tree with branching factor **4**, with the shared attributes following the same
+tree and never the whole ring:
 
-- **device:** cada par pai/filho divide um dispositivo — é a aresta que cria a árvore;
-- **endereço:** dividido dentro de um ramo (pai + filhos diretos);
-- **chave PIX:** só entre os coletores (líder e filhos diretos).
+- **device:** each parent/child pair shares a device — it is the edge that creates
+  the tree;
+- **address:** shared within a branch (parent + direct children);
+- **destination PIX key:** each member pays into the account of their branch's
+  parent, so the payers of one key are exactly the **siblings** of that branch.
 
-Na população limpa, o compartilhamento é **estruturado, não sorteado**: domicílios
-de 2 a 3 pessoas (18% da população) e 4% das transações operadas do dispositivo de
-uma conta vizinha. Pessoas aleatórias dividindo endereço criariam um componente
-conexo artificial.
+In the clean population, sharing is **structured, not drawn at random**: households
+of 2 to 3 people (18% of the population) and 4% of transactions operated from a
+neighbouring account's device. Random people sharing an address would create an
+artificial connected component.
 
-## Consequência medida
+## The revision that mattered
 
-Rede de 30 membros, entrando pelo líder, no dataset completo (150 mil pessoas):
+The first version of the PIX funnel spread payments across five fixed collectors
+per ring. Materialisation turns the payers of one key into a clique, and cliques of
+six to seven members collapsed the ring's diameter: entering from **any** node
+brought 22 of 30 members at the first hop. The reveal by depth — the spine of the
+demonstration — stopped existing.
 
-| Profundidade | Nós | Membros da rede alcançados |
+Paying the branch parent fixes it: groups of four, and the PIX edge links sibling
+to sibling, complementing the device edge (parent to child) instead of duplicating
+it.
+
+A second, related lesson came from choosing the entry point. Ranking ring members
+by degree picks the funnel collector, and entering there also brings the whole ring
+at depth 1. Ranking by *low* degree picks a leaf, and the ring only closes at depth
+5. The leader — the root of the tree — is the node that gives the readable curve,
+and that is what `_entry_nodes` prefers; the degree ranking is only a fallback for
+rings whose leader has no materialised edges.
+
+## Measured consequence
+
+A 30-member ring, entering through the leader, on the full dataset (150,000
+people):
+
+| Depth | Nodes | Ring members reached |
 |---|---|---|
 | 1 | 7 | 7/30 |
-| 2 | 15 | 15/30 |
-| 3 | 30 | **30/30** |
-| 4 | 30 | 30/30 |
-| 5 | 30 | 30/30 |
-| 6 | 30 | 30/30 |
+| 2 | 16 | 16/30 |
+| 3 | 31 | **30/30** |
+| 4 | 31 | 30/30 |
+| 5 | 31 | 30/30 |
 
-A revelação é gradual e legível — que é o que o passo 3 do roteiro precisa. A
-partir da profundidade 3 o traversal satura: a rede é um componente fechado, e não
-há vazamento para a população limpa.
+The reveal is gradual and readable — which is what step 3 of the script needs. From
+depth 3 on the traversal saturates: the ring is a closed component, and there is no
+leakage into the clean population.
 
-**Isso é uma consequência, não um objetivo, e mudou o roteiro.** Uma versão
-anterior deste ADR previa que a profundidade 4 começaria a alcançar gente
-legítima, o que se confirmou no dataset reduzido de teste (onde os hubs ficam
-abaixo do limiar de poda) mas **não** no dataset completo, onde eles são
-descartados na materialização. A degradação por fan-out existe e é mensurável —
-só não é aqui. Ela está medida em `LIMITATIONS.md §4`, a partir de um hub, e o
-roteiro foi corrigido para mostrá-la lá.
+The edge-type toggle also became meaningful. At depth 3, disabling the device edge
+collapses the network from 31 nodes to 3, while disabling address or destination
+key changes almost nothing — so the analyst can test, live, which link actually
+holds the ring together.
 
-Documentar a previsão que não se confirmou é deliberado: é o tipo de detalhe que
-um arquiteto do lado do cliente vai testar.
+**This is a consequence, not a goal, and it changed the script.** An earlier version
+of this ADR predicted that depth 4 would start reaching legitimate people, which was
+confirmed on the reduced test dataset (where hubs fall below the pruning threshold)
+but **not** on the full dataset, where they are discarded at materialisation.
+Degradation by fan-out exists and is measurable — it just is not here. It is
+measured in `LIMITATIONS.md §4`, starting from a hub, and the script was corrected
+to show it there.
+
+Documenting the prediction that did not hold is deliberate: it is exactly the kind
+of detail an architect on the customer's side will test.

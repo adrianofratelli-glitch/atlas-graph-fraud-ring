@@ -170,9 +170,27 @@ def acid(ctx: dict) -> None:
     caso = r.json()
     check("marcou o número de pessoas pedido", caso["people_flagged"] == len(rede), f"{caso['people_flagged']}/{len(rede)}")
 
-    # Idempotência: repetir não deve duplicar efeito nem explodir.
+    # Segundo caso sobre os mesmos nós é recusado, e essa é a resposta certa.
+    #
+    # Antes o backend aceitava: `case_id` das contas era sobrescrito e o primeiro
+    # caso virava uma casca com `status: "open"` e zero contas. Encerrar o segundo
+    # liberava tudo, e sobrava no banco um registro de auditoria afirmando
+    # investigação aberta sobre nada — pior do que um erro, numa POV cujo
+    # argumento é a coerência do registro.
     r2 = post("/api/investigation/flag", {"person_ids": rede, "reason": "de novo"})
-    check("marcar duas vezes não quebra", r2.status_code == 200, f"HTTP {r2.status_code}")
+    check("segundo caso sobre os mesmos nós é recusado", r2.status_code == 409, f"HTTP {r2.status_code}")
+    detalhe = r2.json().get("detail", {})
+    check(
+        "o 409 devolve o case_id já aberto",
+        detalhe.get("case_id") == caso["case_id"],
+        f"case_id={detalhe.get('case_id')}",
+    )
+    ainda = get(f"/api/investigation/case/{caso['case_id']}").json()
+    check(
+        "o caso original manteve todas as suas contas",
+        ainda["ok"] and len(ainda["accounts"]) > 0,
+        f"{len(ainda.get('accounts', []))} contas",
+    )
 
     # Concorrência: N transações simultâneas sobre os MESMOS documentos.
     # É aqui que aparece WriteConflict se o isolamento estiver errado.

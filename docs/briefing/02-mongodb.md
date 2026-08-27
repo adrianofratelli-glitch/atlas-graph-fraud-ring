@@ -1,125 +1,228 @@
 # 02 — MongoDB
 
-Modelagem detalhada, com o raciocínio de escolha entre os dois padrões de grafo,
-está em [`schema/collections.md`](../../schema/collections.md). Este arquivo cobre
-o que roda contra o cluster.
+The detailed modelling, including the reasoning behind the choice between the two
+graph patterns, is in [`schema/collections.md`](../../schema/collections.md). This
+file covers what runs against the cluster.
 
-## Coleções
+## Collections
 
-| Coleção | Papel | Origem |
+| Collection | Role | Source |
 |---|---|---|
-| `people` | entidades do grafo | `generate_synthetic_data.py` |
-| `accounts` | contas, 1-3 por pessoa | idem |
-| `devices` | um por conta + 5 hubs deliberados | idem |
-| `transactions` | 600k, com `reason_text` e `reason_embedding` | idem + `embed_reasons.py` |
-| `connections` | arestas materializadas, bidirecionais | `materialize_connections.py` |
-| `rings` | ground truth das redes injetadas | `inject_fraud_rings.py` |
-| `investigations` | casos abertos pela transação ACID | backend |
-| `alerts` | disparos do change stream | backend |
-| `connections_scale` | grafo sintético de 2,4 M de arestas, só para medir escala | `tests/scale_graph.py` |
+| `people` | graph entities | `generate_synthetic_data.py` |
+| `accounts` | accounts, 1-3 per person, each with a unique PIX key | idem |
+| `devices` | one per account plus 5 deliberate hubs | idem |
+| `transactions` | 600k, with `reason_text`, `reason_embedding` and `to_pix_key` | idem + `embed_reasons.py` |
+| `connections` | materialised edges, bidirectional | `materialize_connections.py` |
+| `rings` | ground truth of the injected networks | `inject_fraud_rings.py` |
+| `investigations` | cases opened by the ACID transaction | backend |
+| `alerts` | change stream fires | backend |
+| `connections_scale` | synthetic 2.4 M edge graph, only for measuring scale | `tests/scale_graph.py` |
 
-## Índices
+## Indexes
 
-> **Armadilha que custou caro nesta POV.** `materialize_connections.py --rebuild`
-> faz `drop()` em `connections`, e `drop()` leva os índices junto. Como o
-> pipeline criava os índices num passo anterior, o traversal rodou por
-> **COLLSCAN de 117.974 documentos em cada nível do BFS** — e nada quebrou, só
-> ficou lento. Os primeiros benchmarks publicados foram medidos assim.
+> **The trap that cost the most here.** `materialize_connections.py --rebuild`
+> calls `drop()` on `connections`, and `drop()` takes the indexes with it. Because
+> the pipeline created the indexes in an earlier step, the traversal ran a
+> **COLLSCAN of 117,974 documents at every BFS level** — and nothing broke, it just
+> got slow. The first published benchmarks were measured that way.
 >
-> Correção: os índices de `connections` são criados **pela própria
-> materialização**, no fim dela, e `run_all.sh` confere que existem antes de
-> declarar sucesso. `queries/08_explain_traversal.js` e o bloco *Plano de
-> execução* de `tests/test_resilience.py` são a guarda de regressão.
+> Fix: the `connections` indexes are created **by the materialisation itself**, at
+> the end of it, and `run_all.sh` checks they exist before declaring success.
+> `queries/08_explain_traversal.js` and the *Execution plan* block of
+> `tests/test_resilience.py` are the regression guard.
 >
-> Efeito medido da correção, profundidade 3: **525 ms → 275 ms**, contra um piso
-> de rede de 256 ms na época. Medindo depois sem proxy no caminho, com piso de
-> 8,5 ms, a mesma consulta ficou em **9,5 ms**.
+> Measured effect of the fix at depth 3: **525 ms → 275 ms**, against a network
+> floor of 256 ms at the time. Measured later without a proxy in the path, with an
+> 8.5 ms floor, the same query came in at **9.5 ms**.
 
-`schema/indexes.js` cria os B-tree das demais coleções; `schema/search_indexes.py` cria os de busca,
-que têm ciclo de vida próprio (`PENDING` → `BUILDING` → `READY`) e por isso não
-cabem no mesmo script.
+`schema/indexes.js` creates the B-trees for the other collections;
+`schema/search_indexes.py` creates the search indexes, which have their own
+lifecycle (`PENDING` → `BUILDING` → `READY`) and therefore do not fit in the same
+script.
 
-Os quatro índices de `connections`, e por que cada um existe:
+The four `connections` indexes, and why each exists:
 
-| Índice | Papel |
+| Index | Role |
 |---|---|
-| `{from: 1}` | `connectFromField` do `$graphLookup` |
-| `{to: 1}` | `connectToField`; lido a cada nível para montar o lote seguinte |
-| `{type: 1, from: 1}` | filtro por tipo de aresta, que é o toggle da tela |
-| `{from: 1, weight: 1}` | filtro de poda dentro do índice, não no FETCH |
+| `{from: 1}` | `connectFromField` of `$graphLookup` |
+| `{to: 1}` | `connectToField`; read at every level to build the next batch |
+| `{type: 1, from: 1}` | filter by edge type, which is the screen's toggle |
+| `{from: 1, weight: 1}` | pruning filter inside the index, not in FETCH |
 
-O último foi acrescentado depois de medir. Com `{from: 1}` sozinho, o
-`restrictSearchWithMatch: {weight: {$lte: N}}` roda no estágio **FETCH**: o
-servidor busca o documento e só então descarta. Num nó de grau 400 no grafo de
-escala, eram 400 documentos lidos para devolver 227. Com o composto, 227 chaves e
-227 documentos, e o traversal de um salto caiu 27%.
+The last one was added after measuring. With `{from: 1}` alone,
+`restrictSearchWithMatch: {weight: {$lte: N}}` runs at the **FETCH** stage: the
+server fetches the document and only then discards it. On a degree-400 node in the
+scale graph, that was 400 documents read to return 227. With the compound index,
+227 keys and 227 documents, and single-hop traversal dropped 27%.
 
-Em profundidade maior o composto não muda nada, porque lá o custo é montar o
-resultado e não buscar chave. Custa cerca de 1% do tamanho da coleção. Ver
-`tests/index_tuning.py`.
+At greater depth the compound index changes nothing, because there the cost is
+assembling the result, not fetching keys. It costs about 1% of the collection size.
+See `tests/index_tuning.py`.
 
-## Materialização de arestas: a regra que importa
+Three more indexes exist for reasons that only showed up in operation:
 
-Um atributo só vira aresta se seu fan-out estiver **abaixo de
-`HUB_FANOUT_THRESHOLD`** (padrão 50). Um dispositivo usado por 800 contas, ou o
-endereço de uma agência bancária, não é evidência de vínculo — materializá-lo
-transformaria metade da base em um único componente conexo.
+| Index | Why |
+|---|---|
+| `accounts.pix_key` (unique, sparse) | the DICT guarantees one key per account; the unique index is the guard against the wrong model creeping back in |
+| `transactions.simulated` (sparse) | `POST /api/demo/reset` deletes simulated transactions; without it that is a COLLSCAN of 604k documents and the reset times out mid-presentation |
+| `transactions.{reason_text, reason_embedding}` | `embed_reasons.py` does one `update_many` per distinct text filtering on a missing embedding; without it that is 33 COLLSCANs of 600k documents |
 
-`shares_device` é construída só a partir de `from_account`, deliberadamente.
-Incluir `to_account` transformaria "A pagou B do celular de A" em aresta de
-dispositivo compartilhado, que não é vínculo nenhum. Foi medido: com `to_account`
-incluso, o grau médio da população limpa sobe de ~1 para 8.6 e a profundidade 2
-varre metade da base.
+## Edge materialisation: the rule that matters
+
+An attribute only becomes an edge if its fan-out is **below
+`HUB_FANOUT_THRESHOLD`** (default 50). A device used by 800 accounts, or a bank
+branch's address, is not evidence of a link — materialising it would turn half the
+database into a single connected component.
+
+`shares_device` is built only from `from_account`, deliberately. Including
+`to_account` would turn "A paid B from A's phone" into a shared-device edge, which
+is no link at all. It was measured: with `to_account` included, the average degree
+of the clean population rises from ~1 to 8.6 and depth 2 sweeps half the database.
+
+### The PIX key: the model that was corrected
+
+The first version linked two people by the **same PIX key**, with `pix_key` on
+`people`. That does not exist in a Brazilian bank: the DICT directory (BCB
+Resolution No. 1/2020) guarantees that one key addresses exactly one transactional
+account at a time and rejects duplicate registration. The edge described a state
+the payment system prevents — the kind of error that costs the credibility of the
+entire conversation at the architect's first question.
+
+The current model:
+
+- `accounts.pix_key` is **unique per account**, with a `unique` index. A CPF key on
+  account `k=0` (one per person), a random key (EVP) on the others, as the DICT
+  allows.
+- `transactions.to_pix_key` holds the payment's **destination** key.
+- `same_pix_counterparty` groups by `to_pix_key` and links the people whose
+  accounts paid into the same key. That is the collection account at the end of the
+  mule funnel.
+
+Two guards against legitimate noise, in `pix_counterparty_groups`: the payer must
+have paid that key at least `MIN_PIX_HITS` times (a single payment to a merchant is
+a purchase, not complicity), and a key receiving from more than
+`HUB_FANOUT_THRESHOLD` people is a hub and does not become an edge.
+
+### The funnel topology, and why it is hierarchical
+
+Each member pays the **parent** in the tree, which is their branch's collector. The
+first version spread payments across five fixed collectors, and the effect on the
+topology was bad: the payers of one key become a clique at materialisation, and
+cliques of six to seven collapsed the ring's diameter. Entering from any node
+brought 22 of 30 members at the first hop — the reveal by depth, which is the spine
+of the demonstration, stopped existing.
+
+Paying the parent makes the payers of a key exactly the **siblings** of that
+branch: groups of four, and the PIX edge links sibling to sibling. It complements
+the device edge (which links parent to child) instead of duplicating it, and the
+tree stays deep. The measured reveal from the leader is 7 → 16 → 31 nodes.
+
+`data-generator/migrate_pix_model.py` migrates an already-generated dataset without
+regenerating the 150,000 people. The `to_pix_key` backfill runs entirely on the
+server, with `$lookup` + `$merge`: the naive path (one `update_many` per key) would
+be 240,000 round trips to the cluster. It is resumable — it filters on what still
+has no key — which mattered in practice, because the first run was interrupted with
+part of the `$merge` already committed.
 
 ## Pipelines
 
-| Arquivo | O que demonstra |
+| File | What it demonstrates |
 |---|---|
-| `queries/01_graphlookup_explicit_edges.js` | Padrão B, tempo por profundidade |
-| `queries/02_graphlookup_shared_attributes.js` | Padrão A, para comparação |
-| `queries/03_hops_between.js` | distância em saltos via `depthField` |
-| `queries/04_prune_impact.js` | impacto medido de `restrictSearchWithMatch` |
-| `queries/05_search_and_vector.js` | entity resolution difusa |
-| `queries/06_transaction_flag_ring.js` | transação ACID multi-documento |
-| `queries/bench.py` | preenche `queries/benchmarks.md` com números medidos |
+| `queries/01_graphlookup_explicit_edges.js` | Pattern B, time by depth |
+| `queries/02_graphlookup_shared_attributes.js` | Pattern A, for comparison |
+| `queries/03_hops_between.js` | hop distance via `depthField` |
+| `queries/04_prune_impact.js` | measured impact of `restrictSearchWithMatch` |
+| `queries/05_search_and_vector.js` | fuzzy entity resolution |
+| `queries/06_transaction_flag_ring.js` | multi-document ACID transaction |
+| `queries/bench.py` | fills `queries/benchmarks.md` with measured numbers |
 
-## Transação ACID
+## ACID transaction
 
-Escopo: `accounts.status`, `people.risk_flags` e um documento em `investigations`.
-`readConcern: snapshot`, `writeConcern: majority`. Ou a rede toda entra em
-investigação, ou nenhum nó entra — um estado intermediário (metade das contas
-bloqueada, sem registro de auditoria coerente) é pior do que não ter agido.
+Scope: `accounts.status`, `people.risk_flags` and one document in `investigations`.
+`readConcern: snapshot`, `writeConcern: majority`. Either the whole network goes
+under investigation or none of it does — an intermediate state (half the accounts
+blocked, with no coherent audit record) is worse than not having acted.
 
-O endpoint recusa acima de 5000 nós: uma rede desse tamanho é trabalho de job em
-lote, não de uma transação única.
+The endpoint refuses above 5000 nodes: a network that size is batch-job work, not a
+single transaction.
 
-## Manutenção incremental de arestas
+It also refuses to open a **second case over nodes already in an open one**.
+Without that, flagging twice overwrote `case_id` on the accounts and the first case
+became a shell: `status: "open"` in `investigations`, zero accounts pointing at it.
+Closing the second released everything, leaving an audit record in the database
+claiming an open investigation over nothing. For a project whose argument is the
+coherence of the record, that state is worse than an error — and refusing is also
+the correct banking behaviour.
 
-O job em lote leva ~15 minutos. Em produção, o grafo não pode esperar por ele: o
-mesmo change stream que dispara o alerta também materializa a aresta
-(`app/services/edge_maintenance.py`). Uma transação nova entra, o vínculo por
-dispositivo aparece em `connections` em **~2 s**, com `source: "change_stream"`,
-e o `$graphLookup` seguinte já o percorre.
+## Incremental edge maintenance
 
-As regras do batch são preservadas literalmente — `_id` determinístico no mesmo
-namespace, só `from_account`, hub acima do limiar não vira aresta. Se divergirem,
-o grafo incremental e o reconstruído deixam de ser o mesmo grafo.
+The batch job takes ~15 minutes. In production the graph cannot wait for it: the
+same change stream that fires the alert also materialises the edge
+(`app/services/edge_maintenance.py`). A new transaction arrives, the device link
+appears in `connections` in **~2 s**, with `source: "change_stream"`, and the next
+`$graphLookup` already walks it.
 
-O que o incremental **não** faz: podar aresta que deixou de fazer sentido, e
-backfill de janela anterior ao listener. O padrão correto é os dois — change
-stream para frescor, batch periódico para consistência e poda. Ver
+The batch rules are preserved literally — deterministic `_id` in the same
+namespace, `from_account` only, a hub above the threshold does not become an edge.
+If they diverge, the incremental graph and the rebuilt graph stop being the same
+graph.
+
+Maintenance only acts on `insert`, or on an `update` whose `updatedFields` touches
+`device_id`, `from_account` or `to_account`. Without that guard any write on
+`transactions` reopened the materialisation: an embedding backfill fired thousands
+of edge writes and as many SSE events, with no device or account having changed.
+
+What the incremental path does **not** do: prune an edge that stopped making sense,
+and backfill a window before the listener started. The correct pattern is both —
+change stream for freshness, periodic batch for consistency and pruning. See
 `docs/adr/0003-manutencao-incremental-de-arestas.md`.
 
 ## Change Streams
 
-`transactions.watch()` em thread própria, com `full_document="updateLookup"`,
-`max_await_time_ms` (para não bloquear o shutdown) e **`resume_token` guardado**,
-para retomar de onde parou se o cursor cair em failover. Cada assinante SSE tem
-fila limitada em 200 eventos: um cliente lento não pode fazer o listener crescer
-memória sem teto.
+`transactions.watch()` on its own thread, with `full_document="updateLookup"`,
+`max_await_time_ms` (so it does not block shutdown) and a **stored `resume_token`**,
+to pick up where it left off if the cursor drops during a failover. Each SSE
+subscriber has a queue capped at 200 events: a slow client must not let the
+listener grow memory without a ceiling.
 
-## Seeds e reprodutibilidade
+The listener publishes two kinds of event. `ring_touch` is the alert. `checked` is
+a simulated transaction that touched **no** flagged account: it reports how many
+accounts were checked and in how many milliseconds. That one exists because silence
+must not look like a broken demo — injecting into a free network is half the A/B,
+and without an event on screen the presenter has no proof the listener even woke
+up. It is limited to simulated transactions; publishing it for all 600,000 would
+drown the SSE in noise.
 
-Semente fixa (`20260826`) no gerador e no `Faker`. `_id` determinístico em tudo.
-Rodar o pipeline de novo produz exatamente o mesmo dataset — inclusive o mesmo
-`ring_000` para o roteiro da demo.
+## Selective filters in vector search
+
+`ring_id` was already a filter field on the vector index, so scoping the semantic
+panel to the network on screen required no index rebuild. It did require
+understanding a trap, and that trap is worth the technical conversation.
+
+`$vectorSearch` walks the HNSW graph of the **entire collection** and applies the
+filter during the walk. A very selective filter — 137 transactions of one ring
+inside 604,000 — discards nearly every candidate, and the search exhausts its list
+before gathering results. Measured: with `numCandidates: 360` the ring returned
+**one** reason; the data held nine.
+
+`numCandidates: 10000` fixes it, and 10,000 is the **server ceiling**
+(`"numCandidates" must be within bounds [1..10000]`), not a number someone picked —
+which also bounds how selective a filter can usefully be here.
+
+## Embeddings and pipeline order
+
+`embed_reasons.py` runs after `generate_synthetic_data.py`, but it used to run
+**before** `inject_fraud_rings.py`. The result: ring transactions were born without
+`reason_embedding`, and the semantic panel scoped to a network returned almost
+nothing — 11 of 137 vectorised transactions in one ring.
+
+The script is idempotent and only fills what is missing, so the fix is to run it
+**after** ring injection and after any migration that creates transactions.
+`run_all.sh` already does the right order; anyone migrating existing data has to
+remember.
+
+## Seeds and reproducibility
+
+Fixed seed (`20260826`) in the generator and in `Faker`. Deterministic `_id`
+everywhere. Running the pipeline again produces exactly the same dataset —
+including the same rings for the demo script.

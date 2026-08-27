@@ -1,101 +1,199 @@
-# 03 — Interface e fluxos
+# 03 — Interface and flows
 
-O visual segue um conjunto de tokens compartilhado entre os projetos de
-demonstração: fundo escuro, verde como sinal de ação e sucesso, azul para
-informação, amarelo para alerta e vermelho para risco. `src/pov-signature.css`
-carrega essa assinatura e é importado depois do stylesheet da aplicação.
+The visual design follows a token set shared across the demonstration projects:
+dark background, green as the signal for action and success, blue for information,
+amber for warning and red for risk. `src/pov-signature.css` carries that signature
+and is imported after the application stylesheet.
 
-## Modo palco
+## Stage mode
 
-Uma tela. O primeiro viewport tem **uma tese** (a transação isolada parece
-legítima), **uma ação** (a profundidade do traversal) e **uma evidência** (o grafo
-com os nós de rede em vermelho e o tempo de resposta medido).
+One screen. The first viewport holds **one thesis** (a transaction on its own looks
+legitimate), **one action** (the traversal depth) and **one piece of evidence** (the
+graph with ring nodes in red and the measured response time).
 
-Tudo que não decide nada para o apresentador saiu do caminho: a query executada
-fica em `<details>`, e os painéis de Search, Vector e alertas ficam abaixo do
-grafo, na ordem do roteiro.
+Anything that decides nothing for the presenter is out of the way: the executed
+query lives in a `<details>`, and the Search, Vector and alert panels sit beside
+the graph, in script order.
 
-## Layout — uma tela, sem rolagem
+## Layout — one screen, no scrolling
 
 ```
-┌─ topbar 52px: marca · tese em uma linha · saúde ───────────────────────┐
+┌─ topbar 52px: brand · one-line thesis · health ────────────────────────┐
 ├──────────┬────────────────────────────────────────┬────────────────────┤
-│ controles│ métricas: nós · arestas · em rede ·     │ inspetor (abas)    │
-│          │           tempo · salto · legenda       │ ┌────────────────┐ │
-│ entrada  │ ┌────────────────────────────────────┐  │ │ Nó │Busca│Sem…│ │
-│ profund. │ │                                    │  │ ├────────────────┤ │
-│ arestas  │ │   canvas (ocupa a altura restante) │  │ │ detalhe do nó  │ │
-│ ação     │ │                    [+] [−] [⤢]     │  │ │ vizinhos-chips │ │
+│ controls │ metrics: nodes · edges · in ring ·      │ inspector (tabs)   │
+│          │          blocked · time · hop · legend  │ ┌────────────────┐ │
+│ entry    │ ┌────────────────────────────────────┐  │ │Node│Search│Sem…│ │
+│ depth    │ │                                    │  │ ├────────────────┤ │
+│ edges    │ │   canvas (takes the remaining      │  │ │ node detail    │ │
+│ action   │ │           height)   [+] [−] [⤢]    │  │ │ neighbour chips│ │
 │          │ └────────────────────────────────────┘  │ └────────────────┘ │
-│          │                                         │ ▸ Query executada  │
+│          │                                         │ ▸ Query executed   │
 └──────────┴────────────────────────────────────────┴────────────────────┘
 ```
 
-`body { overflow: hidden }` e `.app { height: 100dvh }`: a página nunca rola. Só o
-trilho de controles e o corpo do inspetor rolam internamente, quando precisam.
+`body { overflow: hidden }` and `.app { height: 100dvh }`: the page never scrolls.
+Only the control rail and the inspector body scroll internally, when they need to.
 
-A versão anterior empilhava grafo, busca, vetor e alertas numa coluna de 2.600 px
-— o apresentador rolava para achar cada evidência e perdia o grafo de vista. As
-três evidências viraram abas do inspetor, ao lado do grafo, que continua visível o
-tempo todo.
+An earlier version stacked graph, search, vector and alerts in a 2,600 px column —
+the presenter scrolled to find each piece of evidence and lost sight of the graph.
+The three pieces of evidence became inspector tabs, next to the graph, which stays
+visible the whole time.
 
-## Interação com o grafo
+## Graph interaction
 
-Três padrões emprestados de ferramentas de investigação de grafo:
+Three patterns borrowed from graph investigation tools:
 
-- **Realce de vizinhos.** Passar o mouse sobre um nó acende seus vizinhos diretos
-  e atenua todo o resto para ~16% de opacidade. A cadeia que interessa fica
-  sozinha na tela. O nó em foco **mantém a cor do seu tipo** e ganha borda azul —
-  trocar o fundo apagaria a informação de "está numa rede".
-- **Divulgação progressiva.** Nada de tooltip nativo: o detalhe do nó (saltos,
-  grau, marcas de risco, `_id`) vive na aba **Nó** do inspetor, junto com os
-  vizinhos diretos como atalhos clicáveis.
-- **Reacomodação no arraste.** O layout usa `forceAtlas2Based` com
-  `avoidOverlap: 0.85`. A física fica **congelada em repouso** — o design system
-  proíbe animação ambiente contínua — e volta durante o arraste, então nós
-  próximos abrem espaço em vez de se sobreporem. Congela de novo quando o motor
-  estabiliza, com teto de 2,5 s.
+- **Neighbour highlighting.** Hovering a node lights up its direct neighbours and
+  dims everything else to ~16% opacity. The chain that matters is alone on screen.
+  The focused node **keeps its type colour** and gains a blue border — swapping the
+  fill would erase the "this is in a ring" information.
+- **Progressive disclosure.** No native tooltip: the node detail (hops, degree,
+  accounts and when they were opened, risk flags, `_id`) lives in the **Node** tab
+  of the inspector, along with the direct neighbours as clickable shortcuts.
+- **Re-settling on drag.** The layout uses `forceAtlas2Based` with
+  `avoidOverlap: 0.85`. Physics stays **frozen at rest** — the design system
+  forbids continuous ambient animation — and comes back during a drag, so nearby
+  nodes make room instead of overlapping. It freezes again once the engine settles,
+  with a 2.5 s ceiling.
 
-O tamanho do nó escala pela raiz do grau dentro do subgrafo: quem concentra
-vínculos salta aos olhos antes de qualquer rótulo ser lido. Nós de rede recebem um
-halo vermelho discreto.
+Node size scales with the square root of degree within the subgraph: whoever
+concentrates links stands out before any label is read. Ring nodes get a discreet
+red halo. Blocked nodes get a dashed border.
 
-Controles de enquadramento (`+`, `−`, `⤢`) ficam sobre o canvas: depois de
-arrastar ou dar zoom, o apresentador volta ao enquadramento sem recarregar.
+Edge width is 2.4 px, 3 px for device edges and 4.5 px on focus. Colour **is** the
+information here (blue device, amber address, green destination PIX key), and at
+1 px on a dark background the eye cannot separate blue from green at projector
+distance.
 
-## Estados
+Framing controls (`+`, `−`, `⤢`) sit over the canvas: after dragging or zooming,
+the presenter returns to the framing without reloading.
 
-| Estado | O que a tela faz |
+## Pinning a node, and why hover must not win
+
+The right-hand panel resolved the node as `hovered ?? picked`: hover **always** beat
+the click. In practice, clicking a node was useless — moving the mouse towards the
+panel swapped the content, and the analyst could never read the node they had
+chosen.
+
+The priority is now `picked ?? hovered`. Clicking pins; hover only fills the panel
+when nothing is pinned, and keeps isolating neighbours on the canvas either way.
+The pinned node gets a thick white border on the graph and a `pinned ✕` chip in the
+panel: without a permanent mark, when the analyst looks back at the graph they no
+longer know where what they are reading came from.
+
+`pinned` lives in a `useRef` inside `GraphCanvas`, not in the dependencies of the
+`useEffect` that creates the `Network`. Putting it in the dependency list would
+rebuild the graph on every click, throwing away the layout physics had just
+settled.
+
+## The case, without a new tab
+
+The result of the ACID transaction lives in the **left column**, under the button
+that fired it. A new tab would be one more screen for the presenter to remember to
+open mid-demo, and the effect of the action needs to appear where the action
+happened.
+
+The card shows blocked accounts, flagged people, commit time, `snapshot`/`majority`
+and the before/after of the first accounts (`active` → blocked). On the canvas,
+flagged nodes get a **dashed border**, and a "Blocked" metric appears in the top
+bar. Without that, flagging the network changed nothing on screen and the strongest
+part of the demo went unnoticed.
+
+The compliance report (COAF / MED / LGPD) sits in a closed `<details>` that only
+calls the API when opened. It answers "and what does the bank do with this?", a
+question not every audience asks.
+
+If a case is already open over those nodes, the backend refuses with a 409 carrying
+the open `case_id`. The screen does not show an error and stop: it pulls that case
+forward, with the close button next to it, which is the way out the analyst wants.
+
+## The alert A/B
+
+`Close case` and `Reset demo` are buttons, not just endpoints. They exist for
+something that used to be impossible to show: injecting the same transaction
+**with** and **without** the network flagged.
+
+`POST /api/demo/simulate-transaction` accepts `person_ids` — the network on screen
+— and returns `expect_alert`. When nothing is flagged, the screen says in green
+that no alert is the **correct** outcome, not a stalled demo.
+
+Scoping to `person_ids` is not a detail: without it, after closing the case the
+search for a blocked account found an open case from another network, the
+transaction landed there and the alert fired with the on-screen network already
+free. The A/B was lying.
+
+The Alerts tab renders both kinds of event: the red `ring_touch` alert and the grey
+`checked` line saying how many accounts the listener looked at and in how many
+milliseconds. Silence had to have a shape.
+
+## Nothing but an alert steals the tab
+
+Every SSE event used to call `setTab('alerts')`. During a large `update_many` on
+`transactions` — the embedding backfill — the interface jumped to Alerts every few
+seconds and it was impossible to type into a search box. Now only `ring_touch`
+switches tabs; edge maintenance and checks stay in the list without hijacking the
+screen.
+
+## Search scope
+
+Searching "Diego" in a 150,000-person database returned ten random Diegos, and the
+Diego who was on screen did not appear among them. It was not an ordering problem:
+`$search` cuts to the most relevant **before** any annotation, and reordering does
+not fix what never arrived.
+
+Both panels gained a scope segment, with different defaults for different reasons:
+
+| Panel | Default | Why |
+|---|---|---|
+| Atlas Search | `base` | the misspelled twin is **not** in the network; always scoping would kill step 7 |
+| Vector Search | `rede` | loose over the database the panel is a curiosity; scoped, it answers "what excuse do these accounts use?" |
+
+In `base` mode, `resolve_entity` runs a second, network-scoped pass and puts it
+first. Every result carries `na_rede`, and the list shows the tag — which is what
+answers "which of these Diegos is mine?".
+
+The scope reaches the engine through `ring_id`, which is a `token` on the search
+index and a filter field on the vector index. No index had to be rebuilt.
+
+## States
+
+| State | What the screen does |
 |---|---|
-| Backend fora do ar | badge `✕ backend offline`; o canvas diz o que aconteceu |
-| Índice de Search/Vector `BUILDING`/`MISSING` | badge no painel daquele recurso e um aviso explicando; o grafo continua funcionando |
-| Sem `VOYAGE_API_KEY` | mesmo caminho, com status `NO_EMBEDDING_KEY` |
-| Ponto de entrada sem vínculo | canvas vazio com texto, não spinner infinito |
-| Resultado truncado | aviso apontando `LIMITATIONS.md §4`, com a contagem real de arestas encontradas |
-| Nenhum alerta ainda | texto dizendo qual ação produz um, não um vazio mudo |
+| Backend down | `✕ backend offline` badge; the canvas says what happened |
+| Search/Vector index `BUILDING`/`MISSING` | badge on that feature's panel and a notice explaining; the graph keeps working |
+| No `VOYAGE_API_KEY` | same path, with status `NO_EMBEDDING_KEY` |
+| Entry point with no links | empty canvas with text, not an infinite spinner |
+| Truncated result | notice pointing at `LIMITATIONS.md §4`, with the real edge count found |
+| No alerts yet | text saying which action produces one, not a mute void |
+| Flagging at a shallow depth | notice saying how many nodes this expansion would actually block |
 
-Nenhum estado é comunicado só por cor: nó de rede tem borda mais grossa e o
-`ring_id` no tooltip, além do vermelho.
+No state is communicated by colour alone: a ring node has a thicker border and its
+`ring_id` in the panel on top of the red; a blocked node has a dashed border on top
+of the "Blocked" metric.
 
 ## Streaming
 
-Alertas chegam por `EventSource` em `/api/alerts/stream`. O backend manda
-heartbeat a cada 15 s para o navegador não considerar a conexão ociosa morta;
-`EventSource` reconecta sozinho. A UI mantém os 12 alertas mais recentes.
+Alerts arrive over `EventSource` at `/api/alerts/stream`. The backend sends a
+heartbeat every 15 s so the browser does not consider the idle connection dead;
+`EventSource` reconnects on its own. The UI keeps the 20 most recent events.
 
-## Roteiro da demo
+## Demo script
 
-Completo em [`docs/demo-script.md`](../demo-script.md), incluindo o checklist
-pré-demo. Resumo do caminho pela tela:
+The full version is in [`docs/demo-script.md`](../demo-script.md), including the
+pre-demo checklist. Summary of the path through the screen:
 
-1. escolher uma conta limpa no seletor — grafo pequeno, nada acontecendo;
-2. trocar para a conta sob suspeita, profundidade 1;
-3. subir para 2, depois 3 — a rede aparece inteira, os nós vermelhos se fecham;
-4. subir para 4 e 5 — o traversal começa a vazar para a população limpa: é a hora
-   de falar de fan-out e mostrar o toggle de poda;
-5. Atlas Search com o nome grafado errado que o `$graphLookup` por igualdade nunca
-   acharia;
-6. Vector Search com um motivo escrito de outro jeito (opcional, cortar se apertar);
-7. **Marcar N nós sob investigação** — transação ACID, com os números na tela;
-8. **Injetar transação na rede** — o alerta aparece por change stream em tempo real;
-9. fechar em arquitetura: um sistema a menos para operar, sincronizar e proteger.
+1. pick a clean account in the selector — small graph, nothing happening;
+2. switch to the account under suspicion, depth 1;
+3. go to 2, then 3 — the network appears whole, the red nodes close;
+4. uncheck edge types one at a time — without the device edge the network collapses
+   from 31 nodes to 3, which is the hypothesis being tested live;
+5. go to 4 and 5 — the graph saturates: time to talk about fan-out and the pruning
+   toggle;
+6. Atlas Search with the misspelled name that exact-equality `$graphLookup` would
+   never find, and the in-network/outside tags;
+7. Vector Search scoped to the ring — eight ways of saying the same thing;
+8. **Flag N nodes for investigation** — ACID transaction, with the case card and
+   the dashed nodes on the graph;
+9. **Inject transaction into the network** — the alert appears via change stream;
+10. **Close case** and inject again — no alert, and the screen says that is correct;
+11. close on architecture: one less system to operate, synchronise and secure.

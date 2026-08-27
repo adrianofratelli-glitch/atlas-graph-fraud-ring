@@ -76,7 +76,7 @@ def build(db, n_people: int, avg_degree: int) -> None:
                         "_id": det_id("scale", src, dst),
                         "from": src,
                         "to": dst,
-                        "type": rng.choice(["shares_device", "shares_address", "shares_pix_key"]),
+                        "type": rng.choice(["shares_device", "shares_address", "same_pix_counterparty"]),
                         "weight": peso,
                         "created_at": NOW,
                     }

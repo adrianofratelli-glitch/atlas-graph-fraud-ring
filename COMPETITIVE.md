@@ -1,93 +1,95 @@
-# MongoDB comparado a bancos de grafo dedicados
+# MongoDB compared to dedicated graph databases
 
-> Regra de uso deste documento: **nunca citar número de performance de mercado
-> sem benchmark próprio**. Toda afirmação de "mais rápido" ou "mais barato"
-> precisa vir com o contexto do cenário testado. Os números observados neste projeto
-> estão em [`queries/benchmarks.md`](queries/benchmarks.md), com o script que os
-> reproduz.
+> Rule for using this document: **never quote a market performance number without
+> your own benchmark**. Every claim of "faster" or "cheaper" has to come with the
+> context of the scenario tested. The numbers observed in this project are in
+> [`queries/benchmarks.md`](queries/benchmarks.md), along with the script that
+> reproduces them.
 
-## A objeção que este projeto responde
+## The objection this project answers
 
-> "MongoDB não é um banco de grafo. Para esse caso de uso eu preciso de Neo4j (ou
-> Neptune) ao lado."
+> "MongoDB is not a graph database. For this use case I need Neo4j (or Neptune)
+> alongside it."
 
-A objeção é **parcialmente verdadeira**, e a resposta correta não é negá-la — é
-qualificá-la. Verdadeira para cargas *graph-first* com algoritmos pesados
-contínuos. Falsa para a maioria dos casos enterprise, onde grafo é uma **lente de
-investigação sobre dados que já são operacionais no MongoDB**.
+The objection is **partly true**, and the right response is not to deny it — it is
+to qualify it. True for *graph-first* workloads with heavy continuous algorithms.
+False for most enterprise cases, where the graph is an **investigative lens over
+data that is already operational in MongoDB**.
 
-## Tabela comparativa
+## Comparison table
 
-| Dimensão | MongoDB (`$graphLookup`) | Neo4j | Amazon Neptune |
+| Dimension | MongoDB (`$graphLookup`) | Neo4j | Amazon Neptune |
 |---|---|---|---|
-| Modelo primário | documento, com traversal via aggregation pipeline | grafo nativo (nós/arestas com propriedades) | grafo nativo (property graph via Gremlin/openCypher, ou RDF via SPARQL) |
-| Linguagem de query | Aggregation Pipeline (`$graphLookup`) | Cypher | Gremlin / openCypher / SPARQL |
-| Algoritmos de grafo built-in | **não** — requer camada externa (Spark, NetworkX) | sim (Graph Data Science: PageRank, Louvain, centralidade) | parcial (Neptune Analytics cobre um subconjunto) |
-| Casamento de padrão de grafo | traversal BFS, não pattern matching declarativo | sim, é o ponto forte do Cypher | sim |
-| OLTP no mesmo sistema | sim — é o sistema de registro nativo | não recomendado como OLTP primário; costuma conviver com outro banco | tipicamente não é o sistema operacional primário |
-| Full-text search no mesmo motor | sim (Atlas Search, Lucene embarcado) | não nativo | não nativo |
-| Vector search no mesmo motor | sim (Atlas Vector Search) | não nativo | não nativo |
-| Transação ACID multi-documento | sim | sim | limitado |
-| Sharding do dado operacional | sim, com a ressalva de `$graphLookup` sobre coleção não-shardada (`LIMITATIONS.md §1`) | limitado — Fabric tem trade-offs de consistência entre shards | sim, com trade-offs próprios de particionamento de grafo |
-| Superfícies operacionais a manter | 1 sistema | tipicamente 2+ (grafo + operacional) | tipicamente 2+ |
-| Melhor encaixe | traversal moderado sobre dados que já vivem no MongoDB: investigação, fraude, compliance, hierarquias, recomendação simples | grafo como caso de uso central e contínuo, exploração ad-hoc profunda, algoritmos pesados em produção | AWS-native, RDF/SPARQL como requisito, grafos massivos com Gremlin |
+| Primary model | document, with traversal via the aggregation pipeline | native graph (nodes/edges with properties) | native graph (property graph via Gremlin/openCypher, or RDF via SPARQL) |
+| Query language | Aggregation Pipeline (`$graphLookup`) | Cypher | Gremlin / openCypher / SPARQL |
+| Built-in graph algorithms | **no** — requires an external layer (Spark, NetworkX) | yes (Graph Data Science: PageRank, Louvain, centrality) | partial (Neptune Analytics covers a subset) |
+| Graph pattern matching | BFS traversal, not declarative pattern matching | yes, it is Cypher's strong point | yes |
+| OLTP in the same system | yes — it is the native system of record | not recommended as primary OLTP; usually sits next to another database | typically not the primary operational system |
+| Full-text search in the same engine | yes (Atlas Search, embedded Lucene) | not native | not native |
+| Vector search in the same engine | yes (Atlas Vector Search) | not native | not native |
+| Multi-document ACID transaction | yes | yes | limited |
+| Sharding of the operational data | yes, with the caveat that `$graphLookup` needs an unsharded collection (`LIMITATIONS.md §1`) | limited — Fabric has cross-shard consistency trade-offs | yes, with its own graph partitioning trade-offs |
+| Operational surfaces to maintain | 1 system | typically 2+ (graph + operational) | typically 2+ |
+| Best fit | moderate traversal over data already living in MongoDB: investigation, fraud, compliance, hierarchies, simple recommendation | graph as the central, continuous use case; deep ad-hoc exploration; heavy algorithms in production | AWS-native, RDF/SPARQL as a requirement, massive graphs with Gremlin |
 
-## O argumento de custo total, com cuidado
+## The total cost argument, handled carefully
 
-O argumento que costuma ressoar mais do que performance bruta é **redução de
-superfície operacional**. Um segundo banco dedicado a grafo implica:
+The argument that usually resonates more than raw performance is **reduced
+operational surface**. A second database dedicated to the graph implies:
 
-- segunda camada de backup e DR;
-- segunda camada de observabilidade;
-- segunda competência de time (Cypher ou Gremlin);
-- segunda superfície de segurança e compliance — relevante em FSI (LGPD, BACEN);
-- **um pipeline de sincronização entre os dois sistemas**, que é ele próprio uma
-  fonte de bugs e de divergência de dados.
+- a second backup and DR layer;
+- a second observability layer;
+- a second team skill set (Cypher or Gremlin);
+- a second security and compliance surface — material in financial services
+  (LGPD, central bank rules);
+- **a synchronisation pipeline between the two systems**, which is itself a source
+  of bugs and data divergence.
 
-Quando o caso de uso é "investigação sobre dados operacionais" — o mais comum em
-FSI/fraude, telecom/topologia de rede e RH/hierarquias — manter isso no MongoDB
-elimina esse pipeline inteiro: o dado nunca sai do sistema de registro.
+When the use case is "investigation over operational data" — the most common one in
+financial services and fraud, telecom network topology, and HR hierarchies —
+keeping it in MongoDB removes that entire pipeline: the data never leaves the
+system of record.
 
-**Isso não é gratuito.** Para cargas graph-first pesadas, o custo de não ter
-algoritmos nativos (`LIMITATIONS.md §3`) pode superar a economia de TCO. A conversa
-correta é dimensionar caso a caso, não assumir a resposta.
+**This is not free.** For heavy graph-first workloads, the cost of having no native
+algorithms (`LIMITATIONS.md §3`) can outweigh the TCO saving. The right
+conversation is to size it case by case, not to assume the answer.
 
-## O que este projeto mostra na prática
+## What this project shows in practice
 
-Todos os quatro no mesmo cluster, sobre a mesma coleção operacional:
+All four on the same cluster, over the same operational collection:
 
-1. traversal multi-hop com poda de hub (`$graphLookup` + `restrictSearchWithMatch`);
-2. entity resolution difusa que a igualdade exata não pega (Atlas Search `fuzzy`);
-3. similaridade semântica em texto livre (Atlas Vector Search);
-4. ação atômica sobre a rede inteira (transação ACID multi-documento) e alerta em
-   tempo real na próxima transação que a toca (Change Streams).
+1. multi-hop traversal with hub pruning (`$graphLookup` + `restrictSearchWithMatch`);
+2. fuzzy entity resolution that exact equality misses (Atlas Search `fuzzy`);
+3. semantic similarity over free text (Atlas Vector Search);
+4. atomic action over the whole network (multi-document ACID transaction) and a
+   real-time alert on the next transaction that touches it (Change Streams).
 
-Os itens 2, 3 e 4 são o argumento mais forte, e não são sobre grafo: são sobre o
-que você **não precisa integrar** para que a investigação seja completa.
+Items 2, 3 and 4 are the stronger argument, and they are not about graphs: they are
+about what you **do not have to integrate** for the investigation to be complete.
 
-## Quando um banco de grafo ao lado é a recomendação certa
+## When a graph database alongside is the right recommendation
 
-- Algoritmos pesados (PageRank, detecção de comunidade) precisam rodar
-  **continuamente em produção** sobre a base inteira, não em batch ou amostra.
-- O caso de uso é *graph-first* desde a concepção — um produto cuja proposta de
-  valor é exploração de grafo ad-hoc pelo usuário final.
-- O time já tem profundidade em Cypher/Gremlin e o custo de troca de skillset
-  supera o ganho de simplificação operacional.
+- Heavy algorithms (PageRank, community detection) need to run **continuously in
+  production** over the entire base, not in batch or on a sample.
+- The use case is *graph-first* by design — a product whose value proposition is
+  ad-hoc graph exploration by the end user.
+- The team already has depth in Cypher/Gremlin, and the cost of switching skill
+  sets outweighs the operational simplification.
 
-Nesses casos o padrão recomendado é **co-existência**, não substituição: MongoDB
-como sistema operacional de registro, com sincronização via Kafka ou Spark
-Connector para o banco de grafo dedicado.
+In those cases the recommended pattern is **co-existence**, not replacement:
+MongoDB as the operational system of record, synchronised via Kafka or the Spark
+Connector into the dedicated graph database.
 
-## Perguntas a fazer antes de assumir qualquer posição
+## Questions to ask before taking any position
 
-1. O grafo é o produto, ou é uma lente de investigação sobre um produto que já
-   existe (pagamentos, cadastro, rede de telecom)?
-2. Os algoritmos precisam rodar em tempo real sobre 100% da base, ou uma amostra
-   ou subgrafo relevante já resolve o problema de negócio?
-3. Qual a profundidade de traversal necessária no caso real? Um a dois saltos é
-   um problema muito diferente de seis ou mais.
-4. O time já opera Cypher/Gremlin em produção, ou seria uma competência a
-   construir do zero?
+1. Is the graph the product, or is it an investigative lens over a product that
+   already exists (payments, customer records, a telecom network)?
+2. Do the algorithms need to run in real time over 100% of the base, or does a
+   sample or relevant subgraph already solve the business problem?
+3. What traversal depth does the real case need? One or two hops is a very
+   different problem from six or more.
+4. Does the team already run Cypher/Gremlin in production, or would that be a skill
+   built from scratch?
 
-**São as respostas a estas quatro perguntas — não a tabela acima isoladamente —
-que determinam a recomendação.**
+**It is the answers to these four questions — not the table above on its own —
+that determine the recommendation.**

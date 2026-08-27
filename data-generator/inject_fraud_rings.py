@@ -78,6 +78,7 @@ def main() -> None:
     person_updates: list[UpdateOne] = []
     account_updates: list[UpdateOne] = []
     ring_txns: list[dict] = []
+    funnel_txns: list[dict] = []
     ring_devices: list[dict] = []
     typo_people: list[UpdateOne] = []
     summary: list[dict] = []
@@ -90,9 +91,17 @@ def main() -> None:
         if cursor < size:
             raise SystemExit("População insuficiente para o número de redes pedido.")
 
-        shared_pix = f"pix-{ring_id}@exemplo.invalido"
         # Coletores: o líder e seus filhos diretos (índices 1..BRANCHING).
-        collectors = set(range(0, min(BRANCHING + 1, size)))
+        #
+        # Eles NÃO dividem uma chave PIX. O DICT (Resolução BCB nº 1/2020) garante
+        # que uma chave endereça uma única conta, então "duas pessoas com a mesma
+        # chave" não é um estado que exista num banco brasileiro — e um arquiteto
+        # de cliente derruba a demo em dez segundos se a vir.
+        #
+        # O que existe, e é o sinal de verdade: os membros do anel **pagam para a
+        # mesma chave de destino**, a da conta de arrecadação do coletor. É a
+        # assinatura do funil de mulas, e é o que vira `same_pix_counterparty`.
+        collectors = [idx for idx in range(0, min(BRANCHING + 1, size))]  # noqa: F841 (documenta a topologia)
 
         for idx, pid in enumerate(members):
             # Ramo = o pai direto. O nó 0 forma ramo com seus filhos.
@@ -111,7 +120,6 @@ def main() -> None:
                             "ring_id": ring_id,
                             "risk_flags": ["mule_network_candidate"],
                             "addresses": [branch_address],
-                            **({"pix_key": shared_pix} if idx in collectors else {}),
                         }
                     },
                 )
@@ -163,6 +171,42 @@ def main() -> None:
                     }
                 )
 
+        # Funil hierárquico: cada membro paga para o **pai** na árvore, que é o
+        # coletor do seu ramo.
+        #
+        # A versão anterior espalhava os pagamentos entre cinco coletores fixos, e
+        # o efeito na topologia foi ruim: os pagadores de uma mesma chave viram
+        # clique na materialização, e cliques de seis a sete membros derrubaram o
+        # diâmetro do anel. Entrar por qualquer nó trazia 22 dos 30 já no primeiro
+        # salto — a revelação por profundidade, que é a espinha da demonstração,
+        # deixava de existir.
+        #
+        # Pagando o pai, os pagadores de uma chave são exatamente os **irmãos**
+        # daquele ramo: grupos de quatro, e a aresta PIX passa a ligar irmão com
+        # irmão. Ela é complementar à de dispositivo (que liga pai e filho) em vez
+        # de redundante, e a árvore continua profunda.
+        for idx, pid in enumerate(members):
+            if idx == 0:
+                continue
+            coletor = members[(idx - 1) // BRANCHING]
+            if coletor == pid:
+                continue
+            for t in range(2):
+                funnel_txns.append(
+                    {
+                        "_id": det_id("txn", "funnel", ring_id, idx, t),
+                        "from_account": None,
+                        "to_account": None,
+                        "device_id": det_id("device", "ring", ring_id, max(idx, 1)),
+                        "amount": round(rng.uniform(900, 4800), 2),
+                        "reason_text": rng.choice(ALL_RING),
+                        "timestamp": NOW - timedelta(seconds=rng.randint(0, 60 * 86400)),
+                        "ring_id": ring_id,
+                        "_payer": pid,
+                        "_collector": coletor,
+                    }
+                )
+
         # Gêmeo com erro de digitação: pessoa FORA da rede, nome quase idêntico ao
         # do líder. Nenhuma aresta a liga à rede — só o Atlas Search a encontra.
         leader = db.people.find_one({"_id": members[0]}, {"name": 1})
@@ -198,10 +242,20 @@ def main() -> None:
     bulk_replace(db.devices, ring_devices, "devices da rede")
 
     # Resolve as contas reais dos membros só agora (uma consulta, não N).
-    member_ids = {t["_parent"] for t in ring_txns} | {t["_child"] for t in ring_txns}
+    member_ids = (
+        {t["_parent"] for t in ring_txns}
+        | {t["_child"] for t in ring_txns}
+        | {t["_payer"] for t in funnel_txns}
+        | {t["_collector"] for t in funnel_txns}
+    )
     acct_by_person: dict[str, str] = {}
-    for a in db.accounts.find({"person_id": {"$in": list(member_ids)}}, {"person_id": 1}):
+    pix_by_account: dict[str, str] = {}
+    for a in db.accounts.find(
+        {"person_id": {"$in": list(member_ids)}}, {"person_id": 1, "pix_key": 1}
+    ):
         acct_by_person.setdefault(a["person_id"], a["_id"])
+        if a.get("pix_key"):
+            pix_by_account[a["_id"]] = a["pix_key"]
 
     final_txns = []
     for t in ring_txns:
@@ -211,7 +265,18 @@ def main() -> None:
             origem, destino = (parent, child) if invertido else (child, parent)
             t["from_account"] = acct_by_person[origem]
             t["to_account"] = acct_by_person[destino]
+            t["to_pix_key"] = pix_by_account.get(t["to_account"])
             final_txns.append(t)
+
+    for t in funnel_txns:
+        pagador, coletor = t.pop("_payer"), t.pop("_collector")
+        if pagador in acct_by_person and coletor in acct_by_person:
+            t["from_account"] = acct_by_person[pagador]
+            t["to_account"] = acct_by_person[coletor]
+            t["to_pix_key"] = pix_by_account.get(t["to_account"])
+            if t["to_pix_key"]:
+                final_txns.append(t)
+
     bulk_replace(db.transactions, final_txns, "transações da rede")
 
     db.rings.drop()

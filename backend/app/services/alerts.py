@@ -43,6 +43,7 @@ class AlertHub:
             "running": False,
             "events_seen": 0,
             "alerts": 0,
+            "checks_published": 0,
             "edges_materialized": 0,
             "last_error": None,
         }
@@ -116,10 +117,15 @@ class AlertHub:
                             self._publish({"type": "edge_materialized", **manutencao,
                                            "at": datetime.now(timezone.utc).isoformat()})
 
-                        alert = self._evaluate(change)
-                        if alert:
-                            self.state["alerts"] += 1
-                            self._publish(alert)
+                        evento = self._evaluate(change)
+                        if evento:
+                            if evento["type"] == "ring_touch":
+                                self.state["alerts"] += 1
+                            else:
+                                self.state["checks_published"] = (
+                                    self.state.get("checks_published", 0) + 1
+                                )
+                            self._publish(evento)
             except PyMongoError as exc:
                 self.state["running"] = False
                 self.state["last_error"] = str(exc)
@@ -146,6 +152,26 @@ class AlertHub:
         )
         lookup_ms = round((time.perf_counter() - started) * 1000, 1)
         if not hits:
+            # Silêncio não pode parecer demo travada.
+            #
+            # Injetar uma transação numa rede livre é metade do A/B, e sem
+            # nenhum evento na tela o apresentador ficava sem prova de que o
+            # listener tinha sequer acordado. Este evento mostra o trabalho:
+            # transação vista, N contas verificadas, nada marcado, sem alerta.
+            #
+            # Só para transação simulada. Publicar isto para as 600 mil
+            # transações da base afogaria o SSE em ruído.
+            if doc.get("simulated"):
+                return {
+                    "type": "checked",
+                    "transaction_id": doc["_id"],
+                    "amount": doc.get("amount"),
+                    "reason_text": doc.get("reason_text"),
+                    "checked_accounts": account_ids,
+                    "operation": change.get("operationType"),
+                    "lookup_ms": lookup_ms,
+                    "at": datetime.now(timezone.utc).isoformat(),
+                }
             return None
 
         # Upsert, não insert: um `update` na mesma transação passaria de novo por

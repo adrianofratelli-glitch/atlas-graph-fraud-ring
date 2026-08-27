@@ -1,13 +1,13 @@
-# Modelagem de Dados — `schema/collections.md`
+# Data modelling — `schema/collections.md`
 
-## Coleções
+## Collections
 
 ### `people`
 ```json
 {
-  "_id": "uuid-determinístico",
+  "_id": "deterministic uuid",
   "name": "string",
-  "document_id": "cpf sintético, nunca real",
+  "document_id": "synthetic national id, never real",
   "phones": ["string"],
   "addresses": [{ "street": "string", "city": "string", "zip": "string" }],
   "risk_flags": ["string"],
@@ -19,11 +19,14 @@
 ### `accounts`
 ```json
 {
-  "_id": "uuid-determinístico",
+  "_id": "deterministic uuid",
   "person_id": "ref people._id",
-  "account_type": "checking | credit_card | pix_key",
+  "account_type": "checking | credit_card | savings",
+  "pix_key": "<unique per account — the DICT guarantees one key per account>",
+  "pix_key_type": "cpf | evp",
   "opened_at": "date",
   "status": "active | flagged | under_investigation",
+  "case_id": "string | null",
   "ring_id": "string | null"
 }
 ```
@@ -31,7 +34,7 @@
 ### `devices`
 ```json
 {
-  "_id": "device_id (fingerprint sintético)",
+  "_id": "device_id (synthetic fingerprint)",
   "device_type": "mobile | web",
   "first_seen": "date"
 }
@@ -40,41 +43,73 @@
 ### `transactions`
 ```json
 {
-  "_id": "uuid-determinístico",
+  "_id": "deterministic uuid",
   "from_account": "ref accounts._id",
   "to_account": "ref accounts._id",
+  "to_pix_key": "destination PIX key — what same_pix_counterparty groups on",
   "device_id": "ref devices._id",
   "amount": "number",
-  "reason_text": "string (campo livre — usado na demo de vector search)",
-  "reason_embedding": "[float] (Voyage embedding)",
+  "reason_text": "string (free text — used in the vector search demo)",
+  "reason_embedding": "BinData float32 (Voyage embedding)",
   "timestamp": "date"
 }
 ```
 
-### `connections` (padrão de edges explícitas)
+### `connections` (explicit edge pattern)
 ```json
 {
-  "_id": "uuid",
-  "from": "ref (people._id ou accounts._id)",
-  "to": "ref (people._id ou accounts._id)",
-  "type": "shares_device | shares_address | shares_pix_key | family_declared",
-  "weight": "number (força da conexão, ex: nº de transações)",
+  "_id": "deterministic uuid",
+  "from": "ref people._id",
+  "to": "ref people._id",
+  "type": "shares_device | shares_address | same_pix_counterparty",
+  "weight": "number (size of the group that produced the edge)",
+  "shared_key": "the attribute value that produced it",
+  "source": "batch | change_stream",
   "created_at": "date"
 }
 ```
 
-## Dois padrões de modelagem de grafo — quando usar cada um
+## Why the PIX edge is a destination, not a shared key
 
-### Padrão A — Atributo compartilhado como aresta implícita
+The obvious modelling is wrong, and it is worth stating plainly because it is the
+first thing a bank architect will check.
 
-Não existe uma coleção `connections` para esse tipo de relação. A "aresta" é inferida em tempo de query: duas contas que compartilham o mesmo `device_id` estão implicitamente conectadas.
+Brazil's DICT directory (BCB Resolution No. 1/2020) guarantees that **one PIX key
+addresses exactly one transactional account at a time**, and rejects duplicate
+registration. Two accounts holding the same key is not a rare state — it is a state
+the payment system prevents. A `shares_pix_key` edge would describe something that
+cannot happen.
 
-**Quando usar:** quando a relação já é um atributo natural do dado operacional (dispositivo, endereço, telefone) e não faz sentido de negócio mantê-la como uma entidade própria. Vantagem: zero duplicação, zero manutenção de sincronismo. Desvantagem: o `$graphLookup` precisa fazer lookup em `devices`/`addresses` a cada salto, o que é mais custoso do que seguir uma aresta explícita já materializada.
+The real signal is the other side of the payment: **separate accounts paying
+repeatedly into the same destination key**. That is the collection account at the
+end of a mule funnel, and it is the pattern anti-money-laundering teams actually
+hunt. So `pix_key` lives on `accounts` with a `unique` index, `transactions`
+carries `to_pix_key`, and the edge is built by grouping on it.
 
-Exemplo de query (ver `queries/02_graphlookup_shared_attributes.js` para a versão completa):
+Two guards keep legitimate behaviour out: a payer must have paid the same key more
+than once (a single payment to a merchant is a purchase, not complicity), and a key
+receiving from more people than `HUB_FANOUT_THRESHOLD` is a hub — a merchant, a
+payment provider, a utility — and does not become an edge.
+
+## Two graph modelling patterns — when to use each
+
+### Pattern A — shared attribute as an implicit edge
+
+There is no `connections` collection for this kind of relationship. The "edge" is
+inferred at query time: two accounts that share the same `device_id` are implicitly
+connected.
+
+**When to use it:** when the relationship is already a natural attribute of the
+operational data (device, address, phone) and there is no business reason to keep
+it as an entity of its own. Advantage: zero duplication, zero synchronisation
+maintenance. Disadvantage: `$graphLookup` has to look up `devices`/`addresses` at
+every hop, which is more expensive than following an already materialised edge.
+
+Example query (see `queries/02_graphlookup_shared_attributes.js` for the full
+version):
 ```javascript
 db.accounts.aggregate([
-  { $match: { _id: "conta-suspeita-id" } },
+  { $match: { _id: "suspect-account-id" } },
   {
     $graphLookup: {
       from: "transactions",
@@ -89,70 +124,92 @@ db.accounts.aggregate([
 ])
 ```
 
-### Padrão B — Edges explícitas em `connections`
+### Pattern B — explicit edges in `connections`
 
-A relação é materializada como um documento próprio, com peso e tipo. É o padrão mais próximo de um banco de grafo tradicional.
+The relationship is materialised as its own document, with weight and type. It is
+the pattern closest to a traditional graph database.
 
-**Quando usar:** quando a relação em si carrega metadado relevante de negócio (peso, tipo, data de criação, quem declarou a relação — ex: "família declarada" no cadastro), ou quando o traversal via atributo implícito ficaria caro demais em fan-out alto.
+**When to use it:** when the relationship itself carries relevant business metadata
+(weight, type, creation date, who declared it), or when traversing via an implicit
+attribute would be too expensive at high fan-out.
 
 ```javascript
 db.people.aggregate([
-  { $match: { _id: "pessoa-suspeita-id" } },
+  { $match: { _id: "suspect-person-id" } },
   {
     $graphLookup: {
       from: "connections",
       startWith: "$_id",
-      connectFromField: "from",
-      connectToField: "to",
+      connectFromField: "to",
+      connectToField: "from",
       as: "network",
       maxDepth: 4,
       depthField: "hops",
-      restrictSearchWithMatch: { type: { $ne: "family_declared" } }
+      restrictSearchWithMatch: { weight: { $lte: 50 } }
     }
   }
 ])
 ```
 
-**Recomendação da POV:** usar o Padrão B (`connections`) para o núcleo da investigação (é mais barato e mais controlável via `restrictSearchWithMatch`), e o Padrão A apenas como fonte para *popular* `connections` (job que materializa atributos compartilhados como edges, com um limiar mínimo de força — ex: só materializa "shares_device" se o dispositivo foi usado por menos de 50 contas, para evitar hubs genéricos virando aresta de investigação).
+**Recommendation:** use Pattern B (`connections`) for the core of the investigation
+(cheaper and more controllable via `restrictSearchWithMatch`), and Pattern A only
+as the source that *populates* `connections` — a job that materialises shared
+attributes as edges, with a minimum strength threshold, so that generic hubs do not
+become investigation edges.
 
-## Índices obrigatórios (ver `schema/indexes.js` para o script completo)
+## Required indexes (see `schema/indexes.js` for the full script)
 
-| Coleção | Índice | Motivo |
+| Collection | Index | Reason |
 |---|---|---|
-| `connections` | `{ from: 1 }` | `connectFromField` do `$graphLookup` |
-| `connections` | `{ to: 1 }` | `connectToField` do `$graphLookup` |
-| `connections` | `{ type: 1, from: 1 }` | filtro por tipo de aresta |
-| `connections` | `{ from: 1, weight: 1 }` | filtro de poda resolvido no índice, não no FETCH |
-| `transactions` | `{ device_id: 1 }` | traversal via Padrão A |
-| `transactions` | `{ from_account: 1 }`, `{ to_account: 1 }` | queries operacionais + entrada do grafo |
-| `accounts` | `{ ring_id: 1 }` | validação de ground truth na demo |
-| `people` | Atlas Search index (`dynamic`, `autocomplete` em `name`) | entity resolution difusa |
-| `transactions` | Vector Search index em `reason_embedding` | similaridade semântica |
+| `connections` | `{ from: 1 }` | `connectFromField` of `$graphLookup` |
+| `connections` | `{ to: 1 }` | `connectToField` of `$graphLookup` |
+| `connections` | `{ type: 1, from: 1 }` | filter by edge type |
+| `connections` | `{ from: 1, weight: 1 }` | pruning filter resolved in the index, not in FETCH |
+| `transactions` | `{ device_id: 1 }` | Pattern A traversal |
+| `transactions` | `{ from_account: 1 }`, `{ to_account: 1 }` | operational queries + graph entry |
+| `transactions` | `{ to_pix_key: 1 }` | materialisation of `same_pix_counterparty` |
+| `transactions` | `{ simulated: 1 }` | demo reset without a collection scan |
+| `transactions` | `{ reason_text: 1, reason_embedding: 1 }` | embedding backfill without a collection scan |
+| `accounts` | `{ pix_key: 1 }` unique | one key per account, as the DICT requires |
+| `accounts` | `{ ring_id: 1 }` | ground-truth validation in the demo |
+| `people` | Atlas Search index (`autocomplete` on `name`, `token` on `ring_id`) | fuzzy entity resolution, scoped by ring |
+| `transactions` | Vector Search index on `reason_embedding`, filter on `ring_id` | semantic similarity, scoped by ring |
 
-## Quem cria os índices de `connections`
+## Who creates the `connections` indexes
 
-Não é `schema/indexes.js`, e a razão importa: `materialize_connections.py
---rebuild` faz `drop()` na coleção, e `drop()` leva os índices junto. Criar os
-índices num passo anterior do pipeline significa perdê-los em silêncio — o
-traversal continua funcionando, só que por collection scan em cada nível do BFS.
+Not `schema/indexes.js`, and the reason matters: `materialize_connections.py
+--rebuild` calls `drop()` on the collection, and `drop()` takes the indexes with
+it. Creating the indexes in an earlier pipeline step means losing them silently —
+the traversal keeps working, just by collection scan at every BFS level.
 
-Aconteceu de verdade neste projeto e passou despercebido por um tempo, porque nada
-quebra. Os índices agora são criados no fim da própria materialização, e
-`run_all.sh` confere que existem antes de declarar sucesso.
+That actually happened in this project and went unnoticed for a while, because
+nothing breaks. The indexes are now created at the end of the materialisation
+itself, and `run_all.sh` verifies they exist before declaring success.
 
-## Manutenção incremental
+## Incremental maintenance
 
-O job em lote não é o único caminho de escrita em `connections`. O change stream
-em `backend/app/services/edge_maintenance.py` materializa a aresta assim que a
-transação chega, em cerca de dois segundos, preservando as mesmas regras: só
-`from_account`, hub acima do limiar não vira aresta, e `_id` determinístico no
-mesmo namespace do gerador — então uma aresta criada ao vivo colide com a que o
-batch criaria para o mesmo par, em vez de duplicar.
+The batch job is not the only write path into `connections`. The change stream in
+`backend/app/services/edge_maintenance.py` materialises the edge as soon as the
+transaction arrives, in about two seconds, preserving the same rules: `from_account`
+only, a hub above the threshold does not become an edge, and a deterministic `_id`
+in the same namespace as the generator — so an edge created live collides with the
+one the batch would create for the same pair, instead of duplicating it.
 
-Arestas dessa origem carregam `source: "change_stream"`, o que permite auditar
-depois quanto do grafo veio de cada caminho.
+Edges from that source carry `source: "change_stream"`, which makes it possible to
+audit afterwards how much of the graph came from each path.
 
-## Resiliência da modelagem
+Maintenance only reacts to `insert`, or to an `update` whose `updatedFields`
+touches `device_id`, `from_account` or `to_account`. Without that guard, any write
+on `transactions` reopens the materialisation — an embedding backfill fired
+thousands of edge writes with no device or account having changed.
 
-- Todo `_id` é determinístico (hash de atributos-chave), não `ObjectId` aleatório — isso é o que permite o gerador de dados ser idempotente (rodar duas vezes não duplica).
-- `ring_id` existe em `people`, `accounts` e é propagável a `connections` — serve como *ground truth* rastreável para validar que a demo sempre encontra a rede esperada, independente de aleatoriedade do gerador.
+## Resilience of the model
+
+- Every `_id` is deterministic (a hash of key attributes), not a random
+  `ObjectId` — that is what makes the data generator idempotent (running it twice
+  does not duplicate).
+- `ring_id` exists on `people`, `accounts` and `transactions` — it serves as
+  traceable *ground truth* to validate that the demo always finds the expected
+  network, regardless of generator randomness.
+- `accounts.pix_key` is unique. If someone tries to give two accounts the same key,
+  the write fails instead of producing an edge that does not exist in real life.

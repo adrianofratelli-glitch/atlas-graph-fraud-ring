@@ -1,71 +1,90 @@
-# ADR 0003 — Manutenção incremental de arestas pelo change stream
+# ADR 0003 — Incremental edge maintenance via the change stream
 
-**Status:** aceito · **Data:** 2026-08-26
+**Status:** accepted · **Date:** 2026-08-26 (revised 2026-08-27)
 
-## Contexto
+## Context
 
-`materialize_connections.py` reconstrói `connections` inteira e leva ~15 minutos
-no volume padrão. Isso é aceitável para semear a POV e inaceitável em produção: a
-primeira pergunta de um arquiteto sobre grafo materializado é **"e quando chega
-uma transação nova, o grafo fica desatualizado até o próximo batch?"**.
+`materialize_connections.py` rebuilds the whole of `connections` and takes ~15
+minutes at the default volume. That is acceptable for seeding the project and
+unacceptable in production: the first question an architect asks about a
+materialised graph is **"and when a new transaction arrives, is the graph stale
+until the next batch?"**
 
-Sem resposta para isso, a tese da POV fica pela metade. O argumento é que o grafo
-vive junto do dado operacional — mas se o grafo só é atualizado de madrugada, ele
-é um data mart com outro nome, e o cliente está certo em desconfiar.
+Without an answer to that, the thesis is only half made. The argument is that the
+graph lives next to the operational data — but if the graph is only updated
+overnight, it is a data mart by another name, and the customer is right to be
+sceptical.
 
-## Alternativas
+## Alternatives
 
-| Opção | Frescor | Custo | Por quê não |
+| Option | Freshness | Cost | Why not |
 |---|---|---|---|
-| Batch noturno | horas | baixo | é o problema, não a solução |
-| Batch de minuto em minuto | ~1 min | alto (varre tudo) | reconstrói 118k arestas para reagir a 3 transações |
-| Trigger no lado da aplicação | imediato | médio | acopla a escrita do grafo a cada caminho de código que insere transação; qualquer produtor novo esquece |
-| **Change stream** | **~2 s** | **baixo** | o evento já existe e já está sendo lido |
+| Nightly batch | hours | low | that is the problem, not the solution |
+| Batch every minute | ~1 min | high (scans everything) | rebuilds 118k edges to react to 3 transactions |
+| Application-side trigger | immediate | medium | couples the graph write to every code path that inserts a transaction; any new producer forgets |
+| **Change stream** | **~2 s** | **low** | the event already exists and is already being read |
 
-## Decisão
+## Decision
 
-A manutenção roda em `backend/app/services/edge_maintenance.py`, **no mesmo
-cursor de change stream** que já dispara os alertas. Abrir um segundo stream
-dobraria a leitura do oplog para consumir exatamente os mesmos eventos.
+Maintenance runs in `backend/app/services/edge_maintenance.py`, **on the same
+change stream cursor** that already fires the alerts. Opening a second stream would
+double the oplog reads to consume exactly the same events.
 
-As regras do job em lote são preservadas literalmente — se divergirem, o grafo
-incremental e o reconstruído deixam de ser o mesmo grafo:
+The batch job's rules are preserved literally — if they diverge, the incremental
+graph and the rebuilt graph stop being the same graph:
 
-- só `from_account` conta (quem **operou** o dispositivo, não quem recebeu);
-- fan-out acima de `HUB_FANOUT_THRESHOLD` não vira aresta;
-- `_id` determinístico via `uuid5` no **mesmo namespace** do gerador, então
-  reprocessar um evento reescreve o mesmo documento em vez de duplicar — e uma
-  aresta criada aqui colide com a que o batch criaria para o mesmo par.
+- only `from_account` counts (whoever **operated** the device, not whoever
+  received);
+- fan-out above `HUB_FANOUT_THRESHOLD` does not become an edge;
+- deterministic `_id` via `uuid5` in the **same namespace** as the generator, so
+  reprocessing an event rewrites the same document instead of duplicating — and an
+  edge created here collides with the one the batch would create for the same pair.
 
-A aresta ganha `source: "change_stream"`, que é o que permite auditar depois
-quanto do grafo veio de cada caminho.
+The edge carries `source: "change_stream"`, which makes it possible to audit
+afterwards how much of the graph came from each path.
 
-## Consequência medida
+## The revision: only react to what changes the graph
 
-`POST /api/demo/link-accounts` insere duas transações que fazem duas pessoas sem
-nenhuma relação dividirem um dispositivo:
+Maintenance originally reacted to **any** write on `transactions`. An embedding
+backfill — one `update_many` per distinct text — fired thousands of edge
+materialisations and as many SSE events, with no device or account having changed.
+The customer's screen turned into a cascade of "edge created live" during an
+operation that touched nothing relevant.
+
+It now acts only on `insert`, or on an `update` whose `updatedFields` touches
+`device_id`, `from_account` or `to_account`.
+
+A related operational note worth knowing before a demo: after a large batch of
+writes, the listener spends time draining the oplog from its stored `resume_token`,
+and new events only appear once it catches up. Restart the backend if that
+happens.
+
+## Measured consequence
+
+`POST /api/demo/link-accounts` inserts two transactions that make two entirely
+unrelated people share a device:
 
 | | |
 |---|---|
-| Aresta antes da inserção | não existe |
-| Aresta depois | **~2 s**, `source: change_stream`, `weight: 2` |
-| Traversal seguinte | já percorre a aresta nova |
+| Edge before the insert | does not exist |
+| Edge after | **~2 s**, `source: change_stream`, `weight: 2` |
+| Next traversal | already walks the new edge |
 
-Coberto por `tests/test_resilience.py`, bloco *Manutenção incremental de aresta*,
-que também verifica que reprocessar não duplica e que o listener sobrevive.
+Covered by `tests/test_resilience.py`, block *Edge maintenance*, which also checks
+that reprocessing does not duplicate and that the listener survives.
 
-## O que isto ainda não resolve — dizer na demo
+## What this still does not solve — say it in the demo
 
-- **Remoção.** Uma aresta que deixou de fazer sentido (o dispositivo virou hub
-  depois de crescer) só some no próximo batch. O incremental adiciona e atualiza;
-  não poda retroativamente.
-- **Backfill.** Change stream só vê o que chega depois que ele está de pé. Carga
-  inicial e recuperação de janela longa continuam sendo trabalho do batch.
-- **Ordem de grandeza.** Foi medido com uma transação por vez. Um pico de milhares
-  de transações por segundo no mesmo dispositivo exigiria agrupar por janela em
-  vez de reagir evento a evento.
+- **Removal.** An edge that stopped making sense (the device became a hub after
+  growing) only disappears at the next batch. The incremental path adds and
+  updates; it does not prune retroactively.
+- **Backfill.** A change stream only sees what arrives after it is up. Initial load
+  and long-window recovery remain batch work.
+- **Order of magnitude.** This was measured with one transaction at a time. A spike
+  of thousands of transactions per second on the same device would require
+  windowed grouping instead of reacting event by event.
 
-O padrão correto é **os dois**: change stream para o frescor, batch periódico para
-consistência e poda. Isso é uma escolha de arquitetura, não uma limitação do
-MongoDB — e é a mesma que se faria com qualquer banco de grafo dedicado do outro
-lado de um pipeline.
+The correct pattern is **both**: change stream for freshness, periodic batch for
+consistency and pruning. That is an architecture choice, not a MongoDB limitation —
+and it is the same choice you would make with any dedicated graph database on the
+other side of a pipeline.
