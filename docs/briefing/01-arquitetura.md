@@ -44,6 +44,17 @@ o que permite trocar driver ou versão sem tocar nas rotas.
    distância em saltos. O gargalo em profundidade alta é o navegador, não o Atlas;
    truncar pela periferia preserva o que interessa e o payload informa
    `truncated: true` para a UI dizer isso em voz alta.
+7. **Teto de tempo, não só de tamanho.** Todo traversal roda com `maxTimeMS`
+   (`GRAPH_MAX_TIME_MS`, padrão 15 s). Medido num grafo de 2,4 M de arestas, o
+   `$graphLookup` moeu **97 segundos** antes de estourar o limite de 100 MB do
+   documento de saída. Sem o teto, isso é uma tela parada por um minuto e meio
+   para no fim dar erro. Com ele, a rota devolve `503` com `too_large: true`, o
+   motivo e o que fazer a respeito.
+8. **Corpo de POST passa por schema, não por checagem manual.** Os modelos
+   `pydantic` no topo de `main.py` existem porque dois bugs reais vieram de
+   validação artesanal: `limit: -1` chegava ao `$vectorSearch` e virava 500, e
+   `person_ids` como string era iterado caractere a caractere até a transação
+   abortar com 409.
 
 ## Variáveis de ambiente
 
@@ -59,6 +70,7 @@ o que permite trocar driver ou versão sem tocar nas rotas.
 | `GRAPH_DEFAULT_DEPTH` | `4` | usado quando o cliente não manda profundidade |
 | `HUB_FANOUT_THRESHOLD` | `50` | limiar de poda de hub |
 | `GRAPH_MAX_NODES` | `1200` | teto de nós no payload |
+| `GRAPH_MAX_TIME_MS` | `15000` | teto de tempo da agregação de traversal |
 
 ## Como rodar
 
@@ -102,6 +114,8 @@ na profundidade 2. Ver `docs/adr/0001-topologia-do-dado-sintetico.md`.
 | POST | `/api/investigation/close/{case_id}` | fecha um caso |
 | POST | `/api/demo/reset` | volta o dataset ao estado pré-demo |
 | POST | `/api/demo/simulate-transaction` | injeta transação que toca a rede sinalizada |
+| POST | `/api/demo/link-accounts` | insere transações que fazem duas pessoas sem vínculo dividirem um dispositivo; quem cria a aresta é o change stream |
+| GET | `/api/connections/between` | existe aresta entre duas pessoas? usado para provar o antes e o depois |
 | GET | `/api/alerts/stream` | SSE alimentado pelo change stream |
 | GET | `/api/alerts/recent` | últimos alertas persistidos |
 
@@ -138,6 +152,7 @@ Registradas porque custaram tempo e voltariam em qualquer POV parecida:
 .venv/bin/python tests/test_resilience.py --quick   # sem change stream e carga
 .venv/bin/python tests/scale_graph.py --build       # grafo de escala (demorado)
 .venv/bin/python tests/scale_graph.py --measure     # mede o traversal em escala
+.venv/bin/python tests/index_tuning.py              # ganho do índice composto
 mongosh "$MONGODB_URI" queries/08_explain_traversal.js   # prova de IXSCAN
 ```
 
@@ -154,9 +169,23 @@ inconsistente. Os blocos:
 | Plano de execução | ausência dos índices de traversal e COLLSCAN disfarçado |
 | Change Streams | rajada de 12 transações simultâneas, perda de evento, morte do listener |
 | Manutenção de aresta | vínculo materializado em tempo real, duplicação por reprocessamento |
+| Manutenção de aresta | vínculo criado ao vivo pelo change stream, duplicação por reprocessamento |
 | Carga | 40 expansões concorrentes com 10 trabalhadores, p50/p95 |
 
-Dois bugs reais saíram daí e estão corrigidos: `limit: -1` chegava ao
-`$vectorSearch` e virava 500, e `person_ids` como string era iterado caractere a
-caractere até a transação abortar com 409. Os dois viraram validação de schema
-(`pydantic`) em vez de checagem manual — ver os modelos no topo de `main.py`.
+Três bugs reais saíram daí, todos corrigidos:
+
+- `limit: -1` chegava ao `$vectorSearch` e virava 500;
+- `person_ids` como string era iterado caractere a caractere até a transação
+  abortar com 409;
+- o par de pessoas de `link-accounts` era fixo, então a **segunda apresentação
+  seguida** falhava: as duas já estavam ligadas pela primeira. Agora é sorteado, e
+  `POST /api/demo/reset` remove as arestas criadas ao vivo.
+
+Os dois primeiros viraram validação de schema (`pydantic`) em vez de checagem
+manual.
+
+`tests/scale_graph.py` e `tests/index_tuning.py` não testam: medem. O primeiro
+constrói um grafo de 2,4 milhões de arestas para descobrir onde o traversal deixa
+de caber; o segundo compara `{from: 1}` com `{from: 1, weight: 1}` no caminho com
+poda. Os dois escrevem JSON ao lado, e os números vão para
+`queries/benchmarks.md`.

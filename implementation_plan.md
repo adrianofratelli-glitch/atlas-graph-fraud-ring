@@ -37,6 +37,7 @@ Documentos de posicionamento, fora do briefing de construção:
 | [`queries/benchmarks.md`](queries/benchmarks.md) | números medidos neste cluster, não estimados |
 | [`docs/demo-script.md`](docs/demo-script.md) | roteiro de 12-15 minutos e checklist pré-demo |
 | [`docs/adr/`](docs/adr/) | decisões de arquitetura registradas |
+| [`tests/`](tests/) | suíte hostil, teste de escala e ajuste de índice |
 
 ## Ordem de construção
 
@@ -49,7 +50,11 @@ Documentos de posicionamento, fora do briefing de construção:
 4. **Backend** (`backend/`), com a camada de acesso isolada em `app/db/`.
 5. **Frontend** (`frontend/`), seguindo o conjunto de tokens visuais compartilhado.
 6. **Benchmarks medidos** (`queries/bench.py`) e preenchimento de
-   `benchmarks.md` e da tabela do `LIMITATIONS.md §4`.
+   `benchmarks.md` e das tabelas do `LIMITATIONS.md`.
+7. **Tentativa de quebrar** (`tests/test_resilience.py`), que achou três bugs.
+8. **Medição de escala** (`tests/scale_graph.py`), que revelou o teto de 100 MB do
+   `$graphLookup` e mostrou que a poda é o que torna o traversal profundo
+   possível.
 
 ## Estado
 

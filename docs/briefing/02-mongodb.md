@@ -16,6 +16,7 @@ o que roda contra o cluster.
 | `rings` | ground truth das redes injetadas | `inject_fraud_rings.py` |
 | `investigations` | casos abertos pela transação ACID | backend |
 | `alerts` | disparos do change stream | backend |
+| `connections_scale` | grafo sintético de 2,4 M de arestas, só para medir escala | `tests/scale_graph.py` |
 
 ## Índices
 
@@ -31,18 +32,31 @@ o que roda contra o cluster.
 > execução* de `tests/test_resilience.py` são a guarda de regressão.
 >
 > Efeito medido da correção, profundidade 3: **525 ms → 275 ms**, contra um piso
-> de rede de 256 ms. O traversal do anel passou a custar ~20 ms de trabalho real.
+> de rede de 256 ms na época. Medindo depois sem proxy no caminho, com piso de
+> 8,5 ms, a mesma consulta ficou em **9,5 ms**.
 
 `schema/indexes.js` cria os B-tree das demais coleções; `schema/search_indexes.py` cria os de busca,
 que têm ciclo de vida próprio (`PENDING` → `BUILDING` → `READY`) e por isso não
 cabem no mesmo script.
 
-Os dois que sustentam o traversal são `connections.{from:1}` e
-`connections.{to:1}` — `connectFromField` e `connectToField` do `$graphLookup`.
-Sem eles a expansão vira collection scan por nível de profundidade.
+Os quatro índices de `connections`, e por que cada um existe:
 
-`connections.{type:1, from:1}` existe para o `restrictSearchWithMatch` por tipo de
-aresta, que é como o frontend liga e desliga dispositivo/endereço/PIX.
+| Índice | Papel |
+|---|---|
+| `{from: 1}` | `connectFromField` do `$graphLookup` |
+| `{to: 1}` | `connectToField`; lido a cada nível para montar o lote seguinte |
+| `{type: 1, from: 1}` | filtro por tipo de aresta, que é o toggle da tela |
+| `{from: 1, weight: 1}` | filtro de poda dentro do índice, não no FETCH |
+
+O último foi acrescentado depois de medir. Com `{from: 1}` sozinho, o
+`restrictSearchWithMatch: {weight: {$lte: N}}` roda no estágio **FETCH**: o
+servidor busca o documento e só então descarta. Num nó de grau 400 no grafo de
+escala, eram 400 documentos lidos para devolver 227. Com o composto, 227 chaves e
+227 documentos, e o traversal de um salto caiu 27%.
+
+Em profundidade maior o composto não muda nada, porque lá o custo é montar o
+resultado e não buscar chave. Custa cerca de 1% do tamanho da coleção. Ver
+`tests/index_tuning.py`.
 
 ## Materialização de arestas: a regra que importa
 

@@ -121,12 +121,36 @@ db.people.aggregate([
 |---|---|---|
 | `connections` | `{ from: 1 }` | `connectFromField` do `$graphLookup` |
 | `connections` | `{ to: 1 }` | `connectToField` do `$graphLookup` |
-| `connections` | `{ type: 1, from: 1 }` | suporte a `restrictSearchWithMatch` |
+| `connections` | `{ type: 1, from: 1 }` | filtro por tipo de aresta |
+| `connections` | `{ from: 1, weight: 1 }` | filtro de poda resolvido no índice, não no FETCH |
 | `transactions` | `{ device_id: 1 }` | traversal via Padrão A |
 | `transactions` | `{ from_account: 1 }`, `{ to_account: 1 }` | queries operacionais + entrada do grafo |
 | `accounts` | `{ ring_id: 1 }` | validação de ground truth na demo |
 | `people` | Atlas Search index (`dynamic`, `autocomplete` em `name`) | entity resolution difusa |
 | `transactions` | Vector Search index em `reason_embedding` | similaridade semântica |
+
+## Quem cria os índices de `connections`
+
+Não é `schema/indexes.js`, e a razão importa: `materialize_connections.py
+--rebuild` faz `drop()` na coleção, e `drop()` leva os índices junto. Criar os
+índices num passo anterior do pipeline significa perdê-los em silêncio — o
+traversal continua funcionando, só que por collection scan em cada nível do BFS.
+
+Aconteceu de verdade neste projeto e passou despercebido por um tempo, porque nada
+quebra. Os índices agora são criados no fim da própria materialização, e
+`run_all.sh` confere que existem antes de declarar sucesso.
+
+## Manutenção incremental
+
+O job em lote não é o único caminho de escrita em `connections`. O change stream
+em `backend/app/services/edge_maintenance.py` materializa a aresta assim que a
+transação chega, em cerca de dois segundos, preservando as mesmas regras: só
+`from_account`, hub acima do limiar não vira aresta, e `_id` determinístico no
+mesmo namespace do gerador — então uma aresta criada ao vivo colide com a que o
+batch criaria para o mesmo par, em vez de duplicar.
+
+Arestas dessa origem carregam `source: "change_stream"`, o que permite auditar
+depois quanto do grafo veio de cada caminho.
 
 ## Resiliência da modelagem
 

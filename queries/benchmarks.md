@@ -24,7 +24,7 @@
 | Data | 2026-08-26 |
 
 **Leia a latência de rede antes de qualquer outro número.** Todo tempo abaixo já
-inclui o piso de ~8,5 ms de rede; o que o benchmark mede é o **incremento** sobre
+inclui o piso de ~8.5 ms de rede; o que o benchmark mede é o **incremento** sobre
 esse piso, que é a parte atribuível ao `$graphLookup`.
 
 > Uma rodada anterior foi medida com um proxy no caminho e piso de **256 ms**. Ele

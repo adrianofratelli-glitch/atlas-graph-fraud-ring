@@ -92,7 +92,7 @@ Num hub. Medido neste dataset, com `queries/07_hub_fanout.js`:
 | | |
 |---|---|
 | Dispositivo mais compartilhado | operado por **7.125 contas** distintas |
-| Padrão A, um único salto a partir dele | 7.125 contas, 7.236 transações, **3.204 ms** a frio (356 ms com cache quente) |
+| Padrão A, um único salto a partir dele | 7.125 contas, 7.236 transações, **1.499 ms** a frio (304 ms com cache quente) |
 
 Um salto. Milhares de contas sem relação nenhuma entre si. É esse o custo que a
 poda evita — e é por isso que a poda que importa acontece **na materialização**,
@@ -195,11 +195,11 @@ operacional. É um trade-off real, e é assim que deve ser apresentado.
 
 Convém dizer isso antes que perguntem. As redes injetadas têm 30 membros e formam
 componentes fechados; o traversal sobre elas custa ~20 ms de trabalho real, contra
-um piso de 256 ms de rede. Isso prova que o `$graphLookup` **encontra** a rede.
-Não prova nada sobre custo, porque o BFS nunca faz trabalho pesado.
+um piso de rede de 8,5 ms. Isso prova que o `$graphLookup` **encontra** a rede.
+Não prova nada sobre custo, porque a busca nunca faz trabalho pesado.
 
-Um arquiteto que ouve "525 ms para 30 nós" e trabalha com 10 milhões de entidades
-tem razão em não se impressionar.
+Quem trabalha com dez milhões de entidades e ouve "30 nós em 9 milissegundos" tem
+razão em não se impressionar: o número não fala do problema dele.
 
 Por isso existe `tests/scale_graph.py`, que constrói um grafo de anexação
 preferencial de **~2,4 milhões de arestas dirigidas** sobre as mesmas 150 mil
