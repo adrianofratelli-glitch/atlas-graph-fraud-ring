@@ -1,21 +1,24 @@
 # Interface
 
-React com Vite, e `vis-network` para desenhar o grafo.
+React with Vite, and `vis-network` to draw the graph.
 
 ```bash
 npm install
-npm run dev      # porta 5350, com proxy para a API na 8350
+npm run dev      # port 5350, proxying to the API on 8350
 npm run build
-npm run preview  # porta 5350, servindo o bundle pronto — é o que ./start.sh usa
+npm run preview  # port 5350, serving the built bundle — this is what ./start.sh uses
 ```
 
-| Arquivo | O que faz |
+| File | What it does |
 |---|---|
-| `src/App.jsx` | a tela inteira: controles, métricas, painéis de busca e alertas |
-| `src/GraphCanvas.jsx` | desenha o resultado do traversal e cuida das interações |
-| `src/api.js` | cliente HTTP; normaliza a indisponibilidade de um recurso |
-| `src/theme.js` | as cores, espelhando o stylesheet |
+| `src/App.jsx` | the whole screen: controls, metrics, search and alert panels |
+| `src/GraphCanvas.jsx` | draws the traversal result and handles the interactions |
+| `src/api.js` | HTTP client; normalises the unavailability of a feature |
+| `src/theme.js` | the colours, mirroring the stylesheet |
 
-O visual usa fundo escuro, verde para ação e sucesso, azul para informação,
-amarelo para alerta e vermelho para risco. Nenhum estado é comunicado só por cor:
-sempre há um ícone, um rótulo ou uma diferença de forma junto.
+The design uses a dark background, green for action and success, blue for
+information, amber for warning and red for risk. No state is communicated by
+colour alone: there is always an icon, a label or a difference in shape alongside.
+
+The page never scrolls. Only the control rail and the inspector body scroll
+internally, and only when the presenter expands something on purpose.

@@ -24,7 +24,9 @@ def main() -> None:
     src = (TEMPLATE if TEMPLATE.exists() else OUT).read_text()
 
     counts = data["counts"]
-    counts_str = " · ".join(f"{v:,} {k}".replace(",", ".") for k, v in counts.items())
+    # Separador de milhar no padrão en-US: os documentos publicados são em inglês,
+    # e trocar por ponto produziria "150.000" no meio de um texto que usa vírgula.
+    counts_str = " · ".join(f"{v:,} {k}" for k, v in counts.items())
 
     table_b = "\n".join(
         f"| {d} | {v['mean_ms']} | {v['p95_ms']} | {v['nodes']} |" for d, v in sorted(data["pattern_b"].items())
@@ -32,7 +34,10 @@ def main() -> None:
     table_a = "\n".join(
         f"| {d} | {v['mean_ms']} | {v['p95_ms']} | {v['accounts']} |" for d, v in sorted(data["pattern_a"].items())
     )
-    rotulo = {"sem_poda": "sem `restrictSearchWithMatch`", "com_poda": "com poda por peso (`weight <= 50`)"}
+    rotulo = {
+        "sem_poda": "without `restrictSearchWithMatch`",
+        "com_poda": "with weight pruning (`weight <= 50`)",
+    }
     table_prune = "\n".join(
         f"| {rotulo[k]} | {v['mean_ms']} | {v['nodes']} |" for k, v in data["prune"].items()
     )

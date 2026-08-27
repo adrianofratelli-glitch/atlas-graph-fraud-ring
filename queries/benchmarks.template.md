@@ -1,214 +1,254 @@
 # Benchmarks
 
-> Números medidos por `queries/bench.py` contra o cluster real. Nunca
-> substituídos por estimativa ou por número de mercado — o valor deste documento
-> é ser reproduzível pelo cliente com um comando.
+> Numbers measured by `queries/bench.py` against the real cluster. Never replaced
+> by an estimate or a market number — the value of this document is that the
+> customer can reproduce it with one command.
 >
 > ```bash
 > .venv/bin/python queries/bench.py --runs 20
 > ```
 >
-> A primeira execução de cada cenário é descartada: ela paga o aquecimento de
-> cache do WiredTiger e mediria a coisa errada.
+> The first run of each scenario is discarded: it pays for WiredTiger cache
+> warm-up and would measure the wrong thing.
+>
+> **Regenerating overwrites `benchmarks.md` with the last run**, including the
+> network floor of wherever that run happened. Measure from the same region as the
+> cluster, or the floor will dominate every row — see the note below about the
+> 256 ms and 324 ms rounds. Check the ping before trusting the output.
 
-## Ambiente de teste
-
-*(preenchido pela última execução — ver `queries/bench-results.json` para o JSON bruto)*
+## Test environment
 
 | | |
 |---|---|
-| Tier do cluster | M20 (4 GB RAM, 150 GB disco), compartilhado com outras aplicações |
-| Latência de rede até o cluster | **PING_MEAN ms** de média (p95 PING_P95 ms) |
+| Cluster tier | M20 (4 GB RAM, 150 GB disk), shared with other applications |
+| Network latency to the cluster | **PING_MEAN ms** average (p95 PING_P95 ms) |
 | Volume | COUNTS |
-| Redes injetadas | 40 (20 a 30 membros cada) |
-| Data | MEASURED_AT |
+| Injected rings | 40 (20 to 30 members each) |
+| Timing measured | MEASURED_AT |
 
-**Leia a latência de rede antes de qualquer outro número.** Todo tempo abaixo já
-inclui o piso de ~PING_MEAN ms de rede; o que o benchmark mede é o **incremento** sobre
-esse piso, que é a parte atribuível ao `$graphLookup`.
+**Read the network latency before any other number.** Every time below already
+includes the ~8.5 ms network floor; what the benchmark measures is the
+**increment** over that floor, which is the part attributable to `$graphLookup`.
 
-> Uma rodada anterior foi medida com um proxy no caminho e piso de **256 ms**. Ele
-> dominava tudo: a expansão de profundidade 3 aparecia como "275 ms" quando o
-> trabalho real era cerca de 1 ms. Duas conclusões daquela rodada eram artefato de
-> rede e foram corrigidas — a principal é que a poda **não** deixava a query mais
-> lenta, isso era ruído. Vale como lembrete: medir do lado errado da rede mede a
-> rede.
+> Two earlier rounds were measured across slower network paths, with floors of
+> **256 ms** and **324 ms**. The floor dominated everything: a depth-3 expansion
+> showed up as "275 ms" when the real work was about 1 ms. Two conclusions from
+> those rounds were network artefacts and have been corrected — the main one being
+> that pruning made the query *slower*, which was noise. Worth keeping as a
+> reminder: measuring from the wrong side of the network measures the network.
+>
+> If you re-run `bench.py` from a high-latency path, expect every row to shift by
+> the floor. Compare increments, not absolutes, and record the ping.
 
-## Otimização de índice para o caminho com poda
+## Index tuning for the pruned path
 
-`restrictSearchWithMatch: {weight: {$lte: N}}` é o padrão da UI. Com `{from: 1}`
-sozinho, esse filtro roda no estágio **FETCH**: o servidor busca o documento e só
-então descarta. Medido num nó de grau 400 no grafo de escala:
+`restrictSearchWithMatch: {weight: {$lte: N}}` is the UI default. With `{from: 1}`
+alone, that filter runs at the **FETCH** stage: the server fetches the document and
+only then discards it. Measured on a degree-400 node in the scale graph:
 
-| Índice | Devolvidos | Chaves examinadas | Docs examinados |
+| Index | Returned | Keys examined | Docs examined |
 |---|---|---|---|
 | `{from: 1}` | 227 | 400 | **400** |
 | `{from: 1, weight: 1}` | 227 | 227 | **227** |
 
-Efeito no tempo, mesmo nó:
+Effect on time, same node:
 
 | | `{from: 1}` | `{from: 1, weight: 1}` | |
 |---|---|---|---|
-| profundidade 1 | 81,0 ms | **58,9 ms** | **−27%** |
-| profundidade 2 | 3.311 ms | 3.461 ms | +5% (ruído) |
+| depth 1 | 81.0 ms | **58.9 ms** | **−27%** |
+| depth 2 | 3,311 ms | 3,461 ms | +5% (noise) |
 
-**Leitura honesta:** o composto ajuda o traversal raso e podado, que é o caso da
-tela. Em profundidade maior o custo é montar o resultado, não buscar chave, e o
-índice não muda nada. Custo: 26,4 MB numa coleção de 2,4 M de arestas, cerca de
-1%. Vale a pena, e não é a diferença entre viável e inviável — essa é a poda.
+**Honest reading:** the compound index helps the shallow, pruned traversal, which is
+what the screen does. At greater depth the cost is assembling the result, not
+fetching keys, and the index changes nothing. Cost: 26.4 MB on a 2.4 M edge
+collection, about 1%. Worth it, and it is not the difference between viable and
+unviable — that is pruning.
 
-Reproduzir: `.venv/bin/python tests/index_tuning.py`
+Reproduce with: `.venv/bin/python tests/index_tuning.py`
 
-## Aviso sobre a primeira versão destes números
+## A note on the first version of these numbers
 
-Os benchmarks publicados antes de 2026-08-26 foram medidos com `connections`
-**sem os índices de traversal**. `materialize_connections.py --rebuild` faz
-`drop()`, que leva os índices junto, e o pipeline os criava num passo anterior —
-então o BFS rodava por COLLSCAN de 117.974 documentos em cada nível. Nada
-quebrava; só ficava lento.
+Benchmarks published before 2026-08-26 were measured with `connections`
+**missing its traversal indexes**. `materialize_connections.py --rebuild` calls
+`drop()`, which takes the indexes with it, and the pipeline created them in an
+earlier step — so the BFS ran a COLLSCAN of 117,974 documents at every level.
+Nothing broke; it was just slow.
 
-Efeito da correção na profundidade 3: **525 ms → 275 ms**. Os índices agora são
-criados pela própria materialização, `run_all.sh` confere que existem, e
-`tests/test_resilience.py` falha se o plano voltar a ser COLLSCAN.
+Effect of the fix at depth 3: **525 ms → 275 ms**. The indexes are now created by
+the materialisation itself, `run_all.sh` verifies they exist, and
+`tests/test_resilience.py` fails if the plan goes back to COLLSCAN.
 
-Está registrado aqui porque um número de benchmark que mudou pela metade merece
-explicação, não substituição silenciosa.
+It is recorded here because a benchmark number that halved deserves an explanation,
+not a silent replacement.
 
-## `$graphLookup` — Padrão B (arestas explícitas em `connections`)
+## `$graphLookup` — Pattern B (explicit edges in `connections`)
 
-| Profundidade | Média (ms) | p95 (ms) | Nós retornados |
+| Depth | Mean (ms) | p95 (ms) | Nodes returned |
 |---|---|---|---|
 TABLE_B
 
-## `$graphLookup` — Padrão A (atributo implícito via `device_id`)
+Times are from the 8.5 ms floor run; node counts are from the current topology,
+where the destination-PIX-key edge links siblings within a branch.
 
-| Profundidade | Média (ms) | p95 (ms) | Contas alcançadas |
+## `$graphLookup` — Pattern A (implicit attribute via `device_id`)
+
+| Depth | Mean (ms) | p95 (ms) | Accounts reached |
 |---|---|---|---|
 TABLE_A
 
-O Padrão A devolve **transações**, não pessoas. Converter em nós de pessoa
-exigiria os `$lookup` que o Padrão B já pagou uma vez, no job de materialização.
-Comparar os dois tempos diretamente é injusto com o Padrão B: ele entrega mais.
+Pattern A returns **transactions**, not people. Turning those into person nodes
+would require the `$lookup`s Pattern B already paid for once, in the materialisation
+job. Comparing the two times directly is unfair to Pattern B: it delivers more.
 
-## Impacto de `restrictSearchWithMatch` (poda de hubs)
+## Which edge type holds the ring together
 
-| Cenário (profundidade 4) | Média (ms) | Nós retornados |
+Same entry point, same depth 3, toggling edge types in the UI:
+
+| Edges enabled | Nodes reached |
+|---|---|
+| all three | 31 |
+| without destination PIX key | 31 |
+| without address | 30 |
+| **without device** | **3** |
+
+Not a performance number — an investigative one. The device fingerprint is what
+holds this ring together; the other two are reinforcement. It is a hypothesis the
+analyst tests live, without writing a query.
+
+## Impact of `restrictSearchWithMatch` (hub pruning)
+
+| Scenario (depth 4) | Mean (ms) | Nodes returned |
 |---|---|---|
 TABLE_PRUNE
 
-## Transação ACID — marcar a rede como sob investigação
+## ACID transaction — flagging the network for investigation
 
-Medido pelo endpoint `POST /api/investigation/flag`, que é o mesmo caminho da demo:
+Measured through `POST /api/investigation/flag`, which is the same path the demo
+uses:
 
-| Tamanho da rede | Contas atualizadas | Tempo (ms) |
+| Network size | Accounts updated | Time (ms) |
 |---|---|---|
-| 28 pessoas | 44 | ~1.050 |
+| 30 people | 44 | 42 warm, ~1,050 cold |
 
-`readConcern: snapshot`, `writeConcern: majority`, três escritas no mesmo commit
+`readConcern: snapshot`, `writeConcern: majority`, three writes in the same commit
 (`accounts`, `people`, `investigations`).
 
-## Change Streams — latência do alerta
+## Change Streams — alert latency
 
-Medida pelo próprio listener (`lookup_ms` no payload do alerta) e visível na UI a
-cada disparo. A verificação de rede — o `find` em `accounts` que decide se a
-transação toca um caso aberto — roda em uma casa de dezenas de milissegundos; o
-tempo dominante entre a inserção e o alerta na tela é a propagação do oplog somada
-ao RTT de rede.
+Measured by the listener itself (`lookup_ms` in the alert payload) and visible in
+the UI on every fire. The network check — the `find` on `accounts` that decides
+whether the transaction touches an open case — runs in the tens of milliseconds;
+the dominant time between insert and alert on screen is oplog propagation plus
+network RTT.
 
-## Escala — traversal sobre 2,4 milhões de arestas
+## Scale — traversal over 2.4 million edges
 
-> Reproduzir: `.venv/bin/python tests/scale_graph.py --build --measure`
+> Reproduce with: `.venv/bin/python tests/scale_graph.py --build --measure`
 >
-> As redes de fraude injetadas têm 30 membros e formam componentes fechados. Elas
-> provam que o traversal **encontra** a rede; não provam nada sobre custo, porque
-> o BFS nunca faz trabalho pesado. Esta seção responde "e com o meu volume?" com
-> número.
+> The injected fraud rings have 30 members and form closed components. They prove
+> the traversal **finds** the network; they prove nothing about cost, because the
+> BFS never does heavy work. This section answers "and at my volume?" with a
+> number.
 
-**Grafo de teste:** anexação preferencial sobre as mesmas 150 mil pessoas,
-**2.398.814 arestas dirigidas**, cauda longa de grau com teto de 400. Coleção
-`connections_scale`, indexada em `from` e `to`.
+**Test graph:** preferential attachment over the same 150,000 people, **2,398,814
+directed edges**, long-tailed degree distribution capped at 400. Collection
+`connections_scale`, indexed on `from` and `to`.
 
-| Entrada | Profundidade | Nós alcançados | Arestas | Tempo |
+| Entry | Depth | Nodes reached | Edges | Time |
 |---|---|---|---|---|
-| grau 340 | 1 | 10.668 | 11.894 | **110 ms** |
-| grau 340 | 2 | — | — | ✗ **estoura 100 MB após 38 s** |
-| grau 14 | 1 | 626 | 642 | 12,6 ms |
-| grau 14 | 2 | 21.278 | 25.809 | **254 ms** |
-| grau 14 | 3 | — | — | ✗ estoura 100 MB após 180 s |
-| grau 12 | 1 | 363 | 376 | 11,8 ms |
-| grau 12 | 2 | 13.597 | 15.823 | **153 ms** |
-| grau 12 | 3 | — | — | ✗ estoura 100 MB após 76 s |
+| degree 340 | 1 | 10,668 | 11,894 | **110 ms** |
+| degree 340 | 2 | — | — | ✗ **exceeds 100 MB after 38 s** |
+| degree 14 | 1 | 626 | 642 | 12.6 ms |
+| degree 14 | 2 | 21,278 | 25,809 | **254 ms** |
+| degree 14 | 3 | — | — | ✗ exceeds 100 MB after 180 s |
+| degree 12 | 1 | 363 | 376 | 11.8 ms |
+| degree 12 | 2 | 13,597 | 15,823 | **153 ms** |
+| degree 12 | 3 | — | — | ✗ exceeds 100 MB after 76 s |
 
-**Dois saltos são interativos mesmo alcançando 21 mil nós** — 254 ms. Três saltos
-não existem sem poda: o traversal alcança a maior parte do componente e estoura o
-teto de 100 MB do documento de saída (`LIMITATIONS.md §5`), depois de moer entre
-38 e 180 segundos.
+**Two hops are interactive even reaching 21,000 nodes** — 254 ms. Three hops do not
+exist without pruning: the traversal reaches most of the component and blows past
+the 100 MB output-document ceiling (`LIMITATIONS.md §5`), after grinding for 38 to
+180 seconds.
 
-### A poda é o que torna a query possível
+### Pruning is what makes the query possible
 
-Mesma entrada de grau alto, mesma profundidade 1, com e sem
-`restrictSearchWithMatch`:
+Same high-degree entry, same depth 1, with and without `restrictSearchWithMatch`:
 
-| | Nós | Tempo |
+| | Nodes | Time |
 |---|---|---|
-| sem poda | 10.668 | 104 ms |
-| **com poda** (`weight <= 5`) | 3.620 | **45 ms** |
+| without pruning | 10,668 | 104 ms |
+| **with pruning** (`weight <= 5`) | 3,620 | **45 ms** |
 
-E numa medição anterior, com um nó de grau 18 na profundidade 3: **sem poda o
-traversal estourava os 100 MB após 40,7 s; com poda, 33.872 nós em 1.044 ms.** De
-impossível para um segundo.
+And in an earlier measurement, with a degree-18 node at depth 3: **without pruning
+the traversal exceeded 100 MB after 40.7 s; with pruning, 33,872 nodes in
+1,044 ms.** From impossible to one second.
 
-`restrictSearchWithMatch` poda **durante** o traversal, antes de o array de saída
-crescer. Um `$match` depois do `$graphLookup` não salvaria nada — o estágio já
-teria estourado.
+`restrictSearchWithMatch` prunes **during** the traversal, before the output array
+grows. A `$match` after `$graphLookup` would save nothing — the stage would already
+have blown up.
 
-### O que estes números dizem, e o que não dizem
+### What these numbers say, and what they do not
 
-**Dizem:** num grafo de 2,4 M de arestas num M20 compartilhado, traversal de 1 a 2
-saltos é interativo (12–254 ms) para qualquer perfil de grau, e a profundidade 3
-exige poda para existir. Investigação de fraude é um caso de 1 a 3 saltos, então
-isso cobre o caso de uso.
+**They say:** on a 2.4 M edge graph on a shared M20, traversal of 1 to 2 hops is
+interactive (12–254 ms) for any degree profile, and depth 3 requires pruning to
+exist at all. Fraud investigation is a 1 to 3 hop case, so this covers the use
+case.
 
-**Não dizem** nada sobre bilhões de arestas, grafo shardado (`LIMITATIONS.md §1`)
-ou algoritmos contínuos (`§3`). E o teto de 100 MB (`§5`) é estrutural: não some
-com tier maior.
+**They say nothing** about billions of edges, a sharded graph (`LIMITATIONS.md §1`)
+or continuous algorithms (`§3`). And the 100 MB ceiling (`§5`) is structural: it
+does not go away with a larger tier.
 
-**O que mudaria:** mais RAM reduz o tempo dos casos que cabem, mas não levanta o
-teto. Para componentes maiores que isso, a resposta é pré-computar subgrafos, não
-comprar máquina.
+**What would change:** more RAM reduces the time of the cases that fit, but does not
+lift the ceiling. For components larger than that, the answer is to pre-compute
+subgraphs, not to buy a bigger machine.
 
-## Conclusões honestas
+## Vector search with a selective filter
 
-**Sobre a rede da demo, o traversal é praticamente de graça.** Piso de rede 8,5 ms;
-profundidade 1 custa 9,2 ms e profundidade 5 custa 11,0 ms. O trabalho atribuível
-ao `$graphLookup` vai de ~0,7 ms a ~2,5 ms. A curva é plana porque a rede satura em
-30 nós na profundidade 3.
+Scoping the semantic panel to one ring uses `ring_id`, a filter field on the vector
+index. `$vectorSearch` walks the HNSW graph of the whole collection and applies the
+filter during the walk, so a very selective filter starves the search:
 
-Isso prova que o traversal encontra a rede sem custo perceptível, e **não prova
-nada sobre volume** — para isso, a seção *Escala*.
+| `numCandidates` | Distinct reasons returned from a 137-transaction ring |
+|---|---|
+| 360 | **1** |
+| 10,000 (server ceiling) | **8** |
 
-**A poda ajuda, e a medição anterior dizia o contrário por causa da rede.** Com
-piso de 256 ms, "273 ms sem poda contra 284 ms com" era ruído interpretado como
-sinal. Com piso de 8,5 ms: 11,9 ms sem poda contra 10,3 ms com, na profundidade 4.
-E no grafo de escala a diferença é de outra ordem: 104 ms contra 45 ms, ou
-"impossível" contra "1 segundo" na profundidade 3.
+The data held nine distinct reasons. This is a design limit, not a tuning knob:
+`"numCandidates" must be within bounds [1..10000]`.
 
-**A poda que mais importa continua sendo a da materialização.**
-`materialize_connections.py --report-only` mostra o que ela descarta:
+## Honest conclusions
 
-| Tipo de hub | Grupos descartados | Alcance |
+**On the demo network, the traversal is essentially free.** Network floor 8.5 ms;
+depth 1 costs 9.2 ms and depth 5 costs 11.0 ms. The work attributable to
+`$graphLookup` runs from ~0.7 ms to ~2.5 ms. The curve is flat because the network
+saturates at the ring's members by depth 3.
+
+That proves the traversal finds the network at no perceptible cost, and **proves
+nothing about volume** — for that, see *Scale*.
+
+**Pruning helps, and an earlier measurement said otherwise because of the network.**
+With a 256 ms floor, "273 ms without pruning against 284 ms with" was noise read as
+signal. With an 8.5 ms floor: 11.9 ms without against 10.3 ms with, at depth 4. And
+on the scale graph the difference is of another order: 104 ms against 45 ms, or
+"impossible" against "one second" at depth 3.
+
+**The pruning that matters most is still the one at materialisation.**
+`materialize_connections.py --report-only` shows what it discards:
+
+| Hub type | Groups discarded | Reach |
 |---|---|---|
-| endereço | 3 | 8.618 pessoas |
-| dispositivo | 5 | 35.251 contas |
+| address | 3 | 8,618 people |
+| device | 5 | 35,251 accounts |
 
-Sem esse descarte, essas 8.618 pessoas ficariam mutuamente conectadas em um salto.
+Without that discard, those 8,618 people would be mutually connected one hop apart.
 
-**Padrão A e Padrão B não são comparáveis pelo relógio.** Os dois ficam em ~10 ms
-porque os dois são triviais nesta escala; o Padrão A alcança 2 contas e o Padrão B
-alcança 30 nós de pessoa. A razão para preferir o Padrão B na investigação não é
-velocidade: é `restrictSearchWithMatch`, que só existe com a aresta materializada.
+**Pattern A and Pattern B are not comparable by the clock.** Both land around 10 ms
+because both are trivial at this scale; Pattern A reaches 2 accounts and Pattern B
+reaches 31 person nodes. The reason to prefer Pattern B for investigation is not
+speed: it is `restrictSearchWithMatch`, which only exists once the edge is
+materialised.
 
-**O que ainda pode ser otimizado:** o índice composto `{from: 1, weight: 1}` (seção
-acima, −27% no caminho podado) já está aplicado. Além disso, o que resta é
-arquitetura, não tuning: expansão sob demanda em vez de vizinhança inteira, e
-pré-computação de subgrafos para componentes que não cabem no teto de 100 MB.
+**What can still be optimised:** the compound index `{from: 1, weight: 1}` (section
+above, −27% on the pruned path) is already applied. Beyond that, what remains is
+architecture, not tuning: on-demand expansion instead of the whole neighbourhood,
+and pre-computed subgraphs for components that do not fit under the 100 MB ceiling.
