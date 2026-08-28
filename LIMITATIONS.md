@@ -10,6 +10,21 @@ Raising these limitations yourself, mid-conversation, tends to work better than
 hoping nobody asks. That is why the script in `docs/demo-script.md` already brings
 up cost at step 5, before the close.
 
+## 0. The scope this project chose, before any technical limitation
+
+This POV demonstrates one shape of graph workload: a **shallow tree queried by
+business key**, loaded in volume. Ownership chains and commercial hierarchies both
+have that shape — a handful of levels, a predictable question, an operational read
+rate.
+
+It deliberately does **not** try to prove MongoDB replaces a graph database for the
+other shape: a dense network explored ad-hoc, with graph algorithms running
+continuously. There the structural advantages of a native graph engine —
+index-free adjacency, embedded algorithms — are real, and the honest answer is
+co-existence. `COMPETITIVE.md` opens with the table that separates the two.
+
+Everything below is a limitation *within* the scope this project did choose.
+
 ## 1. `$graphLookup` and sharding
 
 `$graphLookup` does not read in a distributed way from a sharded collection. The
@@ -62,79 +77,66 @@ structural advantage.
 `$graphLookup` is an iterative BFS: each level fires new lookups. Cost grows with
 the **fan-out reached**, not with the number in `maxDepth`.
 
-### What the fraud ring shows
+### What the ownership chain shows
 
-Entering through the leader of a 30-member ring, on the default dataset:
+Entering through the applicant of a showcase group, on the default dataset:
 
-| Depth | Nodes reached | Ring members | Behaviour |
+| Depth | Companies | Shareholders | Consolidated limit | Overdue |
+|---|---|---|---|---|
+| 1 | 5 | 6 | R$ 11.8 M | **R$ 0** |
+| 2 | **25** | 12 | **R$ 197.2 M** | **R$ 11.2 M** |
+| 3 | 25 | 13 | R$ 197.2 M | R$ 11.2 M |
+| 6 (cap) | 25 | 13 | R$ 197.2 M | R$ 11.2 M |
+
+Two things to read here, and the second is the honest one.
+
+**The reveal is real.** At depth 1 the group looks clean; at depth 2 the arrears
+appear, in a branch the applicant is not part of. That is the demo.
+
+**From depth 2 on, nothing changes.** The tree is shallow and closed, so extra
+levels reach nobody new — and each of those rows costs the same ~4 ms over the
+network floor. Do **not** use this case to talk about degradation: if you tell a
+customer depth 6 is expensive while the screen shows the same 25 companies in the
+same time, the demo contradicts the presenter.
+
+That is not a weakness of the measurement. It is the defining property of the
+pattern this POV was built for, and it is exactly why a dedicated graph engine
+would win nothing here.
+
+### Where the cost actually shows up
+
+Not in depth — in how much the aggregation has to sum afterwards:
+
+| Scope | Advisors reached | Accounts with credit | p50 |
 |---|---|---|---|
-| 1 | 7 | 7/30 | a handful of direct links |
-| 2 | 16 | 16/30 | half the ring |
-| 3 | 31 | **30/30** | the ring closes |
-| 4 | 31 | 30/30 | saturated |
-| 5 | 31 | 30/30 | saturated |
+| advisor | 1 | 421 | 14 ms |
+| manager | 16 | 6,317 | 52 ms |
+| regional | 129 | 50,989 | **462 ms** |
 
-Note what does **not** happen: from depth 3 on, the traversal saturates. The ring
-is a closed component, and adding depth reaches nobody new. Times per depth are in
-[`queries/benchmarks.md`](queries/benchmarks.md), measured over 30 runs per row
-discarding warm-up.
+The traversal is trivial at every row — three hops down a 969-person tree. What
+grows is the `$group` over tens of thousands of exposure documents. Above the
+regional level the honest answer is a rollup, not a live query, and saying so is
+better than letting a customer find the cliff during their own POC.
 
-**Do not use this case to talk about degradation** — it proves the opposite. If you
-tell a customer that depth 5 is expensive and the screen shows the same 31 nodes in
-the same time, the demo contradicts the presenter.
+### The mitigation that mattered, and the one that did not
 
-### Where degradation actually shows up
+**Mattered: fewer round trips.** The same answer went from up to ten serial calls
+(52 ms) to one aggregation (13 ms). On a shallow tree that is the whole game.
 
-At a hub. Measured on this dataset, with `queries/07_hub_fanout.js`:
+**Mattered: summing the right collection.** Denormalising `advisor_id` onto
+`credit_exposure` took the regional book from 13,010 ms to 462 ms, by removing a
+per-document join rather than by adding an index.
 
-| | |
-|---|---|
-| Most shared device | operated by **7,125** distinct accounts |
-| Pattern A, a single hop from it | 7,125 accounts, 7,236 transactions, **1,499 ms** cold (304 ms warm) |
+**Mattered: indexing the right collection.** Moving the activity vectors from
+`companies` (1.2 M rows, 32 distinct texts) to `activities` (32 rows) took the
+concentration query from 29.3 s to milliseconds. See §7.
 
-One hop. Thousands of accounts with no relationship whatsoever to each other. That
-is the cost pruning avoids — and it is why the pruning that matters happens **at
-materialisation**, not at query time.
-
-`materialize_connections.py --report-only` shows what it discards:
-
-| Hub type | Groups discarded | Reach |
-|---|---|---|
-| address | 3 | 8,618 people |
-| device | 5 | 35,251 accounts |
-
-Without that discard, those 8,618 people would be mutually connected one hop apart.
-
-### The two mitigation layers
-
-1. **At materialisation** (`materialize_connections.py`): an attribute only becomes
-   an edge if its fan-out is below `HUB_FANOUT_THRESHOLD`. A bank branch's address
-   is not evidence of a link — materialising it would turn half the database into a
-   single connected component.
-2. **At query time** (`restrictSearchWithMatch`): pruning by edge type and edge
-   weight, exposed in the UI as a toggle.
-
-**Measured: on this dataset query-time pruning makes the query slower** — it has
-nothing left to remove, because materialisation already removed it, and the extra
-filter is pure cost. The toggle stays on screen because in a real database, where
-edges arrive ready-made from an upstream system, it becomes the primary control
-again — but here it is the second line of defence, not the first. Saying that is
-more convincing than pretending pruning always helps.
-
-### The edge-type toggle tells you which link holds the ring together
-
-The three checkboxes are not decoration. On the default entry point, at depth 3:
-
-| Edges enabled | Nodes reached |
-|---|---|
-| all three | 31 |
-| without destination PIX key | 31 |
-| without address | 30 |
-| **without device** | **3** |
-
-The device fingerprint is what holds this ring together; address and destination
-key are reinforcement. That is a hypothesis an analyst can test live, in front of
-the customer, without writing a query.
+**Did not matter: a compound index on the edge.** `{owned_id: 1, owner_type: 1}`
+only pays off with `restrictSearchWithMatch` filtering on `owner_type`, and the
+traversal deliberately does not filter that way — cutting individual shareholders
+would cut exactly the shareholder who bridges two groups the registry treats as
+unrelated. The index was measured, gained nothing for this access pattern, and was
+not kept. Reporting that is more useful than pretending every index helps.
 
 ## 5. The 100 MB ceiling on the `$graphLookup` result
 
@@ -151,8 +153,13 @@ Total size of the output document exceeds 104857600 bytes.
 Consider using $unwind to split the output.
 ```
 
-Measured in `tests/scale_graph.py`, over a graph of **2.4 million directed edges**
-(preferential attachment, 150,000 nodes):
+Measured on a **dense** graph of 2.4 million directed edges (preferential
+attachment over 150,000 nodes), built by an earlier version of this project when
+the use case was a fraud network. That test was removed along with the fraud model,
+so these rows are history rather than something you can re-run here — kept because
+the ceiling is a property of `$graphLookup`, not of that dataset, and because it is
+the limitation most likely to bite a customer who applies this pattern to a dense
+graph:
 
 | Entry | Depth | Result |
 |---|---|---|
@@ -165,6 +172,12 @@ Measured in `tests/scale_graph.py`, over a graph of **2.4 million directed edges
 
 Look at the pair in the last two rows: the same question is impossible without
 pruning and costs one second with it.
+
+**On the current dataset none of this happens**, and that is the honest reading:
+the ownership chain is shallow and closed, the largest showcase group returns 25
+companies, and the traversal never comes close to the ceiling. The limitation is
+real and it is simply not the regime this POV operates in — which is exactly the
+distinction `COMPETITIVE.md` opens with.
 
 And look at the time **before** the failure — 38 to 180 seconds. The stage does not
 fail fast: it traverses, accumulates, and only discovers it does not fit once the
@@ -207,60 +220,114 @@ ceiling — it streams the result instead of materialising a document. In exchan
 `$graphLookup` runs inside the same transaction and the same cluster as the
 operational data. It is a real trade-off, and it should be presented as one.
 
-## 6. The demo graph is small, and that is the strongest objection
+## 6. The demo graph is shallow, and someone will call that convenient
 
-Best to say so before anyone asks. The injected rings have 30 members and form
-closed components; traversing them costs a few milliseconds of real work. That
-proves `$graphLookup` **finds** the network. It proves nothing about cost, because
-the search never does heavy work.
+Best to say so before anyone asks. The showcase groups have 25 companies over four
+levels, and traversing them costs a few milliseconds of real work. That proves
+`$graphLookup` **answers** the question. It proves nothing about a deep or dense
+graph, because the search never does heavy work.
 
-Someone who works with ten million entities and hears "30 nodes in 9 milliseconds"
-is right not to be impressed: the number does not speak to their problem.
+The difference from the usual version of this objection is that the shallowness is
+not a shortcut — it is the **hypothesis**. This POV claims that a large class of
+enterprise graph problems is shallow and point-queried, and that for those the
+right question is load throughput and operational cost, not traversal speed.
+`COMPETITIVE.md` opens with the table that decides whether a given customer is in
+that class.
 
-That is why `tests/scale_graph.py` exists. It builds a preferential-attachment
-graph of **~2.4 million directed edges** over the same 150,000 people and measures
-traversal from high, medium and low degree nodes. The numbers are in
-[`queries/benchmarks.md`](queries/benchmarks.md), section *Scale*. Use those, not
-the ring's, when the conversation is about volume.
+So the answer to "your graph is small" is not a bigger graph. It is: *is your real
+access pattern this shape?* If it is not — if it is ad-hoc exploration with
+algorithms running continuously — then §3 applies and the honest recommendation is
+co-existence.
 
-What remains out of scope even with the scale test: billions of edges, a sharded
-graph (§1) and heavy continuous algorithms (§3).
+What genuinely remains out of scope: billions of edges, a sharded graph (§1), and
+continuous graph algorithms (§3).
 
-## 7. Selective filters in vector search have a ceiling of their own
+## 7. Vector search punishes indexing the wrong collection
 
-Scoping the semantic panel to the ring on screen uses `ring_id`, which is already a
-filter field on the vector index. But `$vectorSearch` walks the HNSW graph of the
-**entire collection** and applies the filter during the walk. A very selective
-filter — 137 transactions of one ring inside 604,000 — discards almost every
-candidate, and with a low `numCandidates` the search runs out before it has
-gathered results.
+The concentration panel compares the meaning of activity descriptions. The first
+version embedded `cnae_descricao` on all 1.2 M companies and ran `$vectorSearch`
+over `companies` with a selective filter.
 
-Measured: with `numCandidates: 360` the ring returned **one** reason; the data held
-nine. Raising it to 10,000 returns all of them — and 10,000 is the server's
-ceiling (`"numCandidates" must be within bounds [1..10000]`), not a number someone
-picked. That also bounds how selective a filter can usefully be here.
+That runs into a real property of the engine: `$vectorSearch` walks the HNSW graph
+of the **entire collection** and applies the filter during the walk. A very
+selective filter discards nearly every candidate, so the search exhausts its list
+before gathering results — the panel comes back almost empty with nothing to
+explain why. Raising `numCandidates` fixes the emptiness and costs time; 10,000 is
+the server ceiling (`"numCandidates" must be within bounds [1..10000]`), not a
+number someone picked, which also bounds how selective a filter can usefully be.
+
+Measured that way: **29.3 seconds** per query.
+
+The real fix was not a bigger `numCandidates`. The base has **32 distinct activity
+descriptions**, and the comparison is between activities, not between the 1.2 M
+companies that repeat them. The vectors now live in their own `activities`
+collection, one document per description, and the same answer takes milliseconds.
+
+The limitation to state honestly is therefore about design, not about the engine:
+**a vector index over a collection whose rows repeat the same text is the wrong
+index**, and the cost of getting that wrong grows with the size of the collection
+rather than with the size of the problem.
 
 ## 8. The data is synthetic, and the topology was designed on purpose
 
 Yes. It is documented in `docs/adr/0001-topologia-do-dado-sintetico.md`, including
-the three alternatives discarded by measurement and why. What the topology does
-**not** do is hide degradation: that shows up in the table above and on screen, at
-step 5 of the script.
+the alternatives discarded by measurement and why.
 
-What synthetic data does not prove: the fan-out distribution of a real database,
-the noise of real customer-record quality, and the behaviour of genuinely free-text
-`reason_text` (here it comes from a pool of templates — see
+Two design choices worth admitting out loud, because a careful architect will spot
+both:
+
+- **The population of individuals is sized to make the data behave, not to match a
+  registry.** With 1.2 M companies, ~2.2 shareholders each and 150,000 people, the
+  same person lands in ~17 companies and "shared shareholder" becomes a property of
+  every pair of companies rather than a finding. The population is 800,000 with a
+  long-tailed draw, and 15% of companies draw from a narrow band that plays the
+  recurring-shareholder role.
+- **The bridge shareholder and the cross-holdings are planted.** They exist so the
+  demo has something to find. A real registry has them too, but at a rate nobody in
+  this project measured.
+
+What synthetic data does not prove: the fan-out distribution of a real ownership
+registry, the noise of real record quality, and behaviour on genuinely free-text
+activity descriptions (here they come from a pool of CNAE templates — see
 `docs/adr/0002-vetores-em-512d-quantizados.md`).
 
-## 9. The scope of this project
+Group **detection quality** is also unproven, and it is a different claim from the
+one this project makes: the groups are generated ground truth, so precision and
+recall against a real registry were never measured. This demonstrates the query,
+not a data-quality pipeline over public CNPJ data.
 
-Traversal and investigation over a moderately sized entity graph: 150,000 people,
-~240,000 accounts, 604,000 transactions, ~119,000 materialised edges — plus a
-synthetic 2.4 M edge graph used only to measure scale. It is **not** evidence of
-behaviour at billions of edges with heavy algorithms running continuously; for that
-scenario, see section 3.
+## 9. Analytical scope has a ceiling, and the app refuses instead of queueing
 
-The demo cluster is an **M20 shared with other applications**. That shapes
-technical decisions: the vectors are 512-dimensional, stored as BinData float32,
-with a quantised index (see `docs/adr/0002-vetores-em-512d-quantizados.md`).
-Sizing for production would start somewhere else.
+The consolidated book of a regional — 129 advisors, ~51,000 credit exposures —
+takes about 460 ms on its own and does not get cheaper with more clients asking
+for it. Measured at 64 concurrent clients without protection: p95 of **8.8
+seconds** across the whole application, including the point lookups that cost 4 ms
+of database work.
+
+The application now caps concurrency per class of query and returns **429** to what
+does not fit (`app/services/limits.py`). That keeps the interactive path at a p95
+of ~308 ms, and it is the honest behaviour — but it *is* a ceiling, and it should
+be stated as one:
+
+- above a few concurrent analytical queries, some callers get refused;
+- for a workload where many users pull large consolidated books at once, the
+  answer is a **rollup**, not this query;
+- the ceiling here is a shared M20 and a demo dataset. Sizing for production is a
+  separate conversation, not an extrapolation of these numbers.
+
+## 10. The scope of this project
+
+An ownership graph of 1.2 M companies, 2.5 M directed ownership edges, 800,000
+individual shareholders and 385,000 credit exposures, plus a 969-person commercial
+hierarchy. It is **not** evidence of behaviour at billions of edges with heavy
+algorithms running continuously; for that scenario, see section 3.
+
+The demo cluster is an **M20 shared with other applications**. That shapes technical
+decisions: the vectors are 512-dimensional, stored as BinData float32, with a
+quantised index (see `docs/adr/0002-vetores-em-512d-quantizados.md`). Sizing for
+production would start somewhere else.
+
+Load throughput was measured **from a workstation against a remote cluster**, so
+client network latency is included and dominates. A production load runs in the
+cluster's own region. Present that number as a floor observed under bad conditions,
+never as a ceiling.

@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
-"""Preenche `queries/benchmarks.md` com números medidos, nunca estimados.
+"""Mede a latência dos caminhos que a demo percorre. Regrava `bench-results.json`.
+
+## O que este script mede, e o que ele não mede
+
+Mede o tempo de resposta **do cliente**, incluindo a rede. Por isso a primeira
+coisa que ele reporta é o piso de rede (`ping`): sem esse número, toda linha da
+tabela é ilegível — uma medição de 275 ms tomada de uma rede com 256 ms de piso
+diz respeito à rede, não ao `$graphLookup`.
+
+Compare **incrementos sobre o piso**, não valores absolutos.
+
+A primeira execução de cada cenário é descartada: ela paga o aquecimento do cache
+do WiredTiger e mediria a coisa errada.
 
 Uso:
-    ../.venv/bin/python queries/bench.py --runs 20
+    .venv/bin/python queries/bench.py --runs 30
 """
 from __future__ import annotations
 
@@ -11,151 +23,97 @@ import json
 import statistics
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "data-generator"))
-from common import get_db  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+
+from app.db import hierarchy, ownership  # noqa: E402
+from app.db.client import get_db  # noqa: E402
 
 
-def timed(fn, runs: int) -> tuple[float, float, object]:
-    """Descarta a primeira execução: ela paga o aquecimento de cache do WiredTiger."""
-    fn()
-    samples, last = [], None
+def tempo(fn, runs: int) -> dict[str, float]:
+    fn()  # descartada: aquecimento
+    amostras = []
     for _ in range(runs):
-        t0 = time.perf_counter()
-        last = fn()
-        samples.append((time.perf_counter() - t0) * 1000)
-    samples.sort()
-    p95 = samples[min(len(samples) - 1, int(len(samples) * 0.95))]
-    return round(statistics.mean(samples), 1), round(p95, 1), last
-
-
-def expand(db, entry, depth, prune=True, edge_types=None):
-    stage = {
-        "from": "connections",
-        "startWith": "$_id",
-        "connectFromField": "to",
-        "connectToField": "from",
-        "as": "network",
-        "maxDepth": depth,
-        "depthField": "hops",
+        t = time.perf_counter()
+        fn()
+        amostras.append((time.perf_counter() - t) * 1000)
+    amostras.sort()
+    return {
+        "p50": round(statistics.median(amostras), 1),
+        "p95": round(amostras[min(len(amostras) - 1, int(len(amostras) * 0.95))], 1),
+        "min": round(amostras[0], 1),
+        "max": round(amostras[-1], 1),
     }
-    clauses = []
-    if prune:
-        clauses.append({"weight": {"$lte": 50}})
-    if edge_types:
-        clauses.append({"type": {"$in": edge_types}})
-    if clauses:
-        stage["restrictSearchWithMatch"] = clauses[0] if len(clauses) == 1 else {"$and": clauses}
-    return lambda: list(
-        db.people.aggregate(
-            [
-                {"$match": {"_id": entry}},
-                {"$graphLookup": stage},
-                {"$project": {"nos": {"$size": {"$setUnion": ["$network.to", []]}}, "arestas": {"$size": "$network"}}},
-            ],
-            allowDiskUse=True,
-        )
-    )
-
-
-def by_device(db, account_id, depth):
-    return lambda: list(
-        db.transactions.aggregate(
-            [
-                {"$match": {"from_account": account_id, "ring_id": {"$ne": None}}},
-                {"$limit": 1},
-                {
-                    "$graphLookup": {
-                        "from": "transactions",
-                        "startWith": "$device_id",
-                        "connectFromField": "device_id",
-                        "connectToField": "device_id",
-                        "as": "network",
-                        "maxDepth": depth,
-                        "depthField": "hops",
-                    }
-                },
-                {"$project": {"contas": {"$size": {"$setUnion": ["$network.from_account", []]}}}},
-            ],
-            allowDiskUse=True,
-        )
-    )
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--runs", type=int, default=20)
-    ap.add_argument("--out", default=str(Path(__file__).parent / "bench-results.json"))
-    args = ap.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument("--runs", type=int, default=30)
+    p.add_argument("--out", default="queries/bench-results.json")
+    args = p.parse_args()
 
     db = get_db()
-    ring = db.rings.find_one(sort=[("size", -1)])
-    # Mesmo ponto de entrada que a UI usa (`services/demo.entry_points`): um nó de
-    # nível intermediário. Entrar pelo líder revela demais na profundidade 1;
-    # entrar por uma folha exige profundidade além do cap.
-    membros = [d["_id"] for d in db.people.find({"ring_id": ring["ring_id"]}, {"_id": 1})]
-    graus = list(
-        db.connections.aggregate(
-            [
-                {"$match": {"from": {"$in": membros}}},
-                {"$group": {"_id": "$from", "grau": {"$sum": 1}}},
-                {"$sort": {"grau": -1}},
-            ]
-        )
-    )
-    # Mesmo ponto de entrada da UI (`services/demo._entry_node`): o líder, desde
-    # que tenha arestas materializadas.
-    com_arestas = {g["_id"] for g in graus}
-    entry = ring["leader"] if ring["leader"] in com_arestas else graus[0]["_id"]
-    account = db.accounts.find_one({"person_id": entry}, {"_id": 1})["_id"]
-    # Para o Padrão A é preciso partir de uma transação *da rede*: a conta também
-    # tem tráfego legítimo, e o dispositivo dele é usado só por ela.
-    ring_txn = db.transactions.find_one({"from_account": account, "ring_id": {"$ne": None}}, {"_id": 1})
-    if ring_txn is None:
-        ring_txn = db.transactions.find_one({"ring_id": ring["ring_id"]}, {"from_account": 1})
-        account = ring_txn["from_account"]
+    db.command("ping")
 
-    ping = timed(lambda: db.command("ping"), args.runs)
-    print(f"latência de rede até o cluster (ping): média {ping[0]} ms, p95 {ping[1]} ms")
-    print("Todo número abaixo inclui essa latência — o cluster é remoto.\n")
+    piso = tempo(lambda: db.command("ping"), args.runs)
+    print(f"piso de rede (ping): p50 {piso['p50']} ms")
 
-    results: dict = {
-        "network_ping": {"mean_ms": ping[0], "p95_ms": ping[1]},
-        "measured_at": datetime.now(timezone.utc).isoformat(),
+    grupo = db.economic_groups.find_one({"showcase": True})
+    if not grupo:
+        raise SystemExit("Sem grupo de vitrine: rode data-generator/generate_ownership.py.")
+    solicitante = db.companies.find_one({"_id": grupo["applicant_id"]}, {"cnpj": 1})
+    # Controle: uma empresa comum, sem participação de PJ — o caso da maioria da
+    # base, e o contraste que mostra que a demo não escolheu só o caso bonito.
+    isolada = db.companies.find_one({"is_holding": {"$ne": True}}, {"cnpj": 1})
+
+    gerente = db.advisors.find_one({"papel": "gerente"}, {"_id": 1})
+    assessor = db.advisors.find_one({"papel": "assessor"}, {"_id": 1})
+
+    cenarios: list[tuple[str, str, callable]] = [
+        ("grupo econômico, profundidade 2", "traversal",
+         lambda: ownership.economic_group(solicitante["cnpj"], 2)),
+        ("grupo econômico, profundidade 3", "traversal",
+         lambda: ownership.economic_group(solicitante["cnpj"], 3)),
+        ("grupo econômico, profundidade 6 (teto)", "traversal",
+         lambda: ownership.economic_group(solicitante["cnpj"], 6)),
+        ("empresa sem grupo, profundidade 3", "traversal",
+         lambda: ownership.economic_group(isolada["cnpj"], 3)),
+    ]
+    if gerente:
+        cenarios.append(("carteira do gerente", "hierarquia",
+                         lambda: hierarchy.portfolio(gerente["_id"])))
+    if assessor:
+        cenarios.append(("carteira do assessor", "hierarquia",
+                         lambda: hierarchy.portfolio(assessor["_id"])))
+        cenarios.append(("checagem de visibilidade", "hierarquia",
+                         lambda: hierarchy.can_see(assessor["_id"], solicitante["cnpj"])))
+
+    linhas = []
+    for nome, familia, fn in cenarios:
+        m = tempo(fn, args.runs)
+        m["scenario"] = nome
+        m["family"] = familia
+        m["over_floor_p50"] = round(m["p50"] - piso["p50"], 1)
+        linhas.append(m)
+        print(f"  {nome:<42} p50 {m['p50']:>7.1f} ms   (+{m['over_floor_p50']:.1f} sobre o piso)")
+
+    relatorio = {
+        "measured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "runs": args.runs,
-        "entry_person": entry,
-        "ring": {"id": ring["ring_id"], "size": ring["size"]},
-        "counts": {c: db[c].estimated_document_count() for c in ["people", "accounts", "devices", "transactions", "connections"]},
-        "pattern_b": {},
-        "pattern_a": {},
-        "prune": {},
+        "network_floor_ms": piso,
+        "volume": {
+            c: db[c].estimated_document_count()
+            for c in ("companies", "ownership", "credit_exposure", "people", "advisors")
+        },
+        "scenarios": linhas,
+        "note": (
+            "medido do cliente; o piso de rede está incluído em toda linha. "
+            "Compare incrementos sobre o piso, não absolutos."
+        ),
     }
-
-    print("Padrão B (arestas explícitas)")
-    for d in range(1, 6):
-        mean, p95, last = timed(expand(db, entry, d), args.runs)
-        nos = last[0]["nos"] if last else 0
-        results["pattern_b"][d] = {"mean_ms": mean, "p95_ms": p95, "nodes": nos}
-        print(f"  depth {d}: {mean:>8.1f} ms  p95 {p95:>8.1f} ms  {nos:>6} nós")
-
-    print("\nPadrão A (device_id implícito)")
-    for d in range(1, 4):
-        mean, p95, last = timed(by_device(db, account, d), args.runs)
-        contas = last[0].get("contas", 0) if last else 0
-        results["pattern_a"][d] = {"mean_ms": mean, "p95_ms": p95, "accounts": contas}
-        print(f"  depth {d}: {mean:>8.1f} ms  p95 {p95:>8.1f} ms  {contas:>6} contas")
-
-    print("\nImpacto da poda de hub (depth 4)")
-    for label, prune in [("sem_poda", False), ("com_poda", True)]:
-        mean, p95, last = timed(expand(db, entry, 4, prune=prune), args.runs)
-        nos = last[0]["nos"] if last else 0
-        results["prune"][label] = {"mean_ms": mean, "p95_ms": p95, "nodes": nos}
-        print(f"  {label:9s}: {mean:>8.1f} ms  {nos:>6} nós")
-
-    Path(args.out).write_text(json.dumps(results, indent=2, ensure_ascii=False))
-    print(f"\nresultados em {args.out}")
+    Path(args.out).write_text(json.dumps(relatorio, indent=2, ensure_ascii=False))
+    print(f"\ngravado em {args.out}")
 
 
 if __name__ == "__main__":

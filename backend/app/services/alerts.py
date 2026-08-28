@@ -1,16 +1,36 @@
-"""Alerta em tempo real via Change Streams.
+"""Alerta em tempo real sobre alteração societária, via Change Streams.
 
-Uma transação nova entra em `transactions`. O listener acorda, verifica se
-alguma das pontas pertence a uma rede já sinalizada e, se sim, publica um alerta
-para os clientes SSE conectados.
+## Por que isto importa numa decisão de crédito
 
-Detalhes que importam numa demo ao vivo:
+Uma decisão de crédito é tomada sobre a fotografia de um grupo econômico num
+instante. O grupo, porém, muda: uma alteração contratual registrada na Junta
+Comercial acrescenta uma controlada, e a exposição consolidada que sustentou a
+decisão deixa de valer — sem que ninguém na mesa saiba.
+
+O caminho comum para isso é uma rotina noturna que recalcula grupos. O change
+stream faz melhor: a participação nova entra em `ownership`, o listener acorda,
+verifica se alguma das pontas está sob revisão de crédito e publica o alerta em
+segundos. Sem polling e sem job agendado.
+
+## Detalhes que importam numa demo ao vivo
 
 - o listener roda em thread própria e o `watch` usa `max_await_time_ms`, então o
   loop não bloqueia o shutdown do uvicorn indefinidamente;
-- ele guarda o `resume_token`: se o cursor cair (rede, failover), retoma de onde
+- guarda o `resume_token`: se o cursor cair por rede ou failover, retoma de onde
   parou em vez de perder eventos;
 - `full_document="updateLookup"` para que um `update` também traga o documento.
+
+## Os dois tipos de evento, e por que o segundo existe
+
+`group_changed` é o alerta. `checked` é a alteração que **não** tocou grupo
+nenhum sob revisão: diz quantas empresas foram verificadas e em quantos
+milissegundos.
+
+O segundo existe porque silêncio não pode parecer demo travada. Injetar uma
+alteração num grupo liberado é metade do A/B que prova que o alerta lê o estado
+em vez de disparar sozinho — e sem evento na tela o apresentador fica sem prova de
+que o listener sequer acordou. Ambos são limitados a alterações simuladas: uma
+carga em lote insere milhões de arestas, e publicar cada uma afogaria o SSE.
 """
 from __future__ import annotations
 
@@ -24,12 +44,9 @@ from typing import Any, Iterator
 from pymongo.errors import PyMongoError
 
 from app.db.client import get_db
-from app.services import edge_maintenance
 
 log = logging.getLogger(__name__)
 
-# Fila por assinante SSE. Limitada de propósito: um cliente lento não pode fazer
-# o listener crescer memória sem teto.
 QUEUE_MAX = 200
 
 
@@ -44,7 +61,6 @@ class AlertHub:
             "events_seen": 0,
             "alerts": 0,
             "checks_published": 0,
-            "edges_materialized": 0,
             "last_error": None,
         }
 
@@ -91,40 +107,20 @@ class AlertHub:
                 }
                 if resume_token:
                     kwargs["resume_after"] = resume_token
-                with db.transactions.watch(**kwargs) as stream:
+                with db.ownership.watch(**kwargs) as stream:
                     self.state["running"] = True
                     self.state["last_error"] = None
-                    log.info("change stream ativo em transactions")
+                    log.info("change stream ativo em ownership")
                     while not self._stop.is_set():
                         change = stream.try_next()
                         if change is None:
                             continue
                         resume_token = stream.resume_token
                         self.state["events_seen"] += 1
-
-                        # Duas responsabilidades no mesmo cursor, de propósito:
-                        # abrir um segundo change stream dobraria a carga no oplog
-                        # para ler exatamente os mesmos eventos.
-                        try:
-                            manutencao = edge_maintenance.maintain(change)
-                        except PyMongoError as exc:
-                            # Falha de manutenção não pode derrubar o alerta: o
-                            # alerta é o que está na tela, a aresta o batch refaz.
-                            log.warning("manutenção de aresta falhou: %s", exc)
-                            manutencao = None
-                        if manutencao and manutencao.get("edges_written"):
-                            self.state["edges_materialized"] += manutencao["edges_written"]
-                            self._publish({"type": "edge_materialized", **manutencao,
-                                           "at": datetime.now(timezone.utc).isoformat()})
-
                         evento = self._evaluate(change)
                         if evento:
-                            if evento["type"] == "ring_touch":
-                                self.state["alerts"] += 1
-                            else:
-                                self.state["checks_published"] = (
-                                    self.state.get("checks_published", 0) + 1
-                                )
+                            chave = "alerts" if evento["type"] == "group_changed" else "checks_published"
+                            self.state[chave] += 1
                             self._publish(evento)
             except PyMongoError as exc:
                 self.state["running"] = False
@@ -136,73 +132,61 @@ class AlertHub:
     # ---- regra do alerta ----
     def _evaluate(self, change: dict[str, Any]) -> dict[str, Any] | None:
         doc = change.get("fullDocument")
-        if not doc:
+        if not doc or not doc.get("simulated"):
+            # Só alteração da demo. Uma carga em lote insere milhões de arestas e
+            # publicar cada uma afogaria o SSE em ruído.
             return None
+
         db = get_db()
-        account_ids = [a for a in (doc.get("from_account"), doc.get("to_account")) if a]
-        if not account_ids:
+        empresas = [c for c in (doc.get("owner_id"), doc.get("owned_id")) if c]
+        if not empresas:
             return None
 
         started = time.perf_counter()
-        hits = list(
-            db.accounts.find(
-                {"_id": {"$in": account_ids}, "status": "under_investigation"},
-                {"person_id": 1, "case_id": 1, "ring_id": 1},
+        sob_revisao = list(
+            db.companies.find(
+                {"_id": {"$in": empresas}, "credit_status": "under_review"},
+                {"razao_social": 1, "cnpj": 1, "case_id": 1},
             )
         )
         lookup_ms = round((time.perf_counter() - started) * 1000, 1)
-        if not hits:
-            # Silêncio não pode parecer demo travada.
-            #
-            # Injetar uma transação numa rede livre é metade do A/B, e sem
-            # nenhum evento na tela o apresentador ficava sem prova de que o
-            # listener tinha sequer acordado. Este evento mostra o trabalho:
-            # transação vista, N contas verificadas, nada marcado, sem alerta.
-            #
-            # Só para transação simulada. Publicar isto para as 600 mil
-            # transações da base afogaria o SSE em ruído.
-            if doc.get("simulated"):
-                return {
-                    "type": "checked",
-                    "transaction_id": doc["_id"],
-                    "amount": doc.get("amount"),
-                    "reason_text": doc.get("reason_text"),
-                    "checked_accounts": account_ids,
-                    "operation": change.get("operationType"),
-                    "lookup_ms": lookup_ms,
-                    "at": datetime.now(timezone.utc).isoformat(),
-                }
-            return None
+        agora = datetime.now(timezone.utc).isoformat()
 
-        # Upsert, não insert: um `update` na mesma transação passaria de novo por
-        # aqui e a chave duplicada mataria a thread do listener no meio da demo.
-        db.alerts.replace_one(
-            {"_id": f"alert_{doc['_id']}"},
-            {
-                # _id textual: o payload do alerta é serializado como JSON para o
-                # SSE e para /api/alerts/recent, e ObjectId não é serializável.
-                "_id": f"alert_{doc['_id']}",
-                "transaction_id": doc["_id"],
-                "accounts": [h["_id"] for h in hits],
-                "case_id": hits[0].get("case_id"),
-                "ring_id": hits[0].get("ring_id"),
-                "amount": doc.get("amount"),
-                "created_at": datetime.now(timezone.utc),
-            },
-            upsert=True,
+        if not sob_revisao:
+            return {
+                "type": "checked",
+                "edge_id": doc["_id"],
+                "checked_companies": len(empresas),
+                "percentage": doc.get("percentage"),
+                "lookup_ms": lookup_ms,
+                "at": agora,
+            }
+
+        adquirida = db.companies.find_one(
+            {"_id": doc["owned_id"]}, {"razao_social": 1, "cnpj": 1}
         )
-        return {
-            "type": "ring_touch",
-            "transaction_id": doc["_id"],
-            "amount": doc.get("amount"),
-            "reason_text": doc.get("reason_text"),
-            "matched_accounts": [h["_id"] for h in hits],
-            "case_id": hits[0].get("case_id"),
-            "ring_id": hits[0].get("ring_id"),
+        exposicao = db.credit_exposure.find_one({"company_id": doc["owned_id"]})
+        alerta = {
+            "type": "group_changed",
+            "edge_id": doc["_id"],
+            "case_id": sob_revisao[0].get("case_id"),
+            "acquirer": sob_revisao[0].get("razao_social"),
+            "acquired": (adquirida or {}).get("razao_social"),
+            "acquired_cnpj": (adquirida or {}).get("cnpj"),
+            "percentage": doc.get("percentage"),
+            # O número que muda a decisão: a exposição que entrou no grupo depois
+            # de a decisão ter sido tomada.
+            "added_limite": (exposicao or {}).get("limite", 0.0),
+            "added_vencido": (exposicao or {}).get("vencido", 0.0),
             "operation": change.get("operationType"),
             "lookup_ms": lookup_ms,
-            "at": datetime.now(timezone.utc).isoformat(),
+            "at": agora,
         }
+        db.ownership_alerts.replace_one({"_id": f"alert_{doc['_id']}"},
+                                        {"_id": f"alert_{doc['_id']}", **alerta,
+                                         "created_at": datetime.now(timezone.utc)},
+                                        upsert=True)
+        return alerta
 
 
 hub = AlertHub()

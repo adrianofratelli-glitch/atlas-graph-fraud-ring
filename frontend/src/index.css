@@ -249,6 +249,38 @@ select, input[type='text'] {
   background: var(--bg-secondary); border: 1px solid var(--border-subtle);
   border-radius: 8px; padding: 8px 10px; font-size: 12.5px;
 }
+
+/* Linha clicável (troca de usuário no painel de visibilidade). É <button> por
+   acessibilidade — teclado e leitor de tela — e o reset abaixo tira só a
+   aparência de botão, não o comportamento. */
+.row.as-button {
+  width: 100%; text-align: left; cursor: pointer; font: inherit; color: inherit;
+}
+.row.as-button:hover { border-color: var(--border-strong, rgba(255,255,255,.35)); }
+.row.as-button:focus-visible { outline: 2px solid var(--focus, #00ed64); outline-offset: 2px; }
+
+/* Linha que está apontando um nó no grafo. O par lista↔grafo precisa ser óbvio
+   nos dois sentidos: o nó ganha borda no canvas, a linha ganha marca aqui. */
+.row.apontado, .alert.as-button.apontado {
+  border-color: var(--link, #0498ec);
+  box-shadow: inset 3px 0 0 var(--link, #0498ec);
+}
+
+/* Alerta clicável: mesma correção do `.row.as-button` — tira a aparência de
+   botão, mantém teclado e leitor de tela. */
+.alert.as-button {
+  width: 100%; text-align: left; cursor: pointer; font: inherit; color: inherit;
+  display: block;
+}
+.alert.as-button:focus-visible { outline: 2px solid var(--focus, #00ed64); outline-offset: 2px; }
+
+/* Caixa de escopo da busca. */
+.check-line {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 11.5px; color: var(--text-muted, #889397); cursor: pointer;
+  margin: 2px 0 4px;
+}
+.check-line input { accent-color: var(--accent, #00ed64); cursor: pointer; }
 .row .grow { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .row .grow em { font-style: normal; color: var(--text-muted); font-size: 11px; }
 .row .score { color: var(--link); font-size: 11.5px; flex: none; }
@@ -384,3 +416,10 @@ select, input[type='text'] {
 }
 .canvas-controls button:hover { color: var(--accent); border-color: var(--accent); }
 @media (max-width: 620px) { .canvas-controls button { width: 44px; height: 44px; } }
+
+/* --- domínio societário ------------------------------------------------- */
+.bad { color: var(--danger); }
+.node-detail dd.wrap { white-space: normal; text-align: right; line-height: 1.3; }
+.node-detail .badge + .badge { margin-left: 5px; }
+.row .grow em.bad { color: var(--danger); }
+.rail select { width: 100%; }

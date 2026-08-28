@@ -1,20 +1,26 @@
-"""Atlas Search e Atlas Vector Search.
+"""Atlas Search sobre razão social.
 
-O ponto da POV aqui não é que MongoDB faz busca — é que faz busca **no mesmo
-motor** que guarda o dado do grafo, então uma "quase-conexão" (nome com erro de
-digitação, motivo semanticamente equivalente) não exige um segundo sistema.
+## O problema real que isto resolve
 
-Ambas as funções degradam explicitamente: se o índice não existe ou ainda está
-`BUILDING`, elas levantam `IndexUnavailable`, a rota devolve 503 e o frontend
-mostra um badge. O `$graphLookup` continua funcionando — ver README.
+Cadastro de empresa é escrito de N formas: "Construtora Alfa S.A.", "CONSTRUTORA
+ALFA SA", "Construtora Alpha SA". Um `$graphLookup` por igualdade nunca liga as
+três, e a esteira de crédito trata como empresas distintas — que é como um grupo
+econômico passa despercebido.
+
+O ponto da POV aqui não é que MongoDB faz busca: é que faz busca **no mesmo motor
+e no mesmo cluster** que guarda a cadeia societária. Resolver razão social não
+exige um segundo sistema, nem um pipeline sincronizando cadastro para ele.
+
+## Degradação
+
+Se o índice não existe ou está `BUILDING`, levanta `IndexUnavailable`, a rota
+devolve 503 e o frontend mostra um aviso naquele painel. O traversal continua
+funcionando: degradação é por recurso, não por tela.
 """
 from __future__ import annotations
 
 import time
 from typing import Any
-
-import httpx
-from bson.binary import Binary, BinaryVectorDtype
 
 from app.config import get_settings
 from app.db.client import get_db, with_retry
@@ -24,7 +30,7 @@ class IndexUnavailable(RuntimeError):
     def __init__(self, index_name: str, status: str) -> None:
         self.index_name = index_name
         self.status = status
-        super().__init__(f"índice `{index_name}` indisponível (status: {status})")
+        super().__init__(f"index `{index_name}` unavailable (status: {status})")
 
 
 def index_status(collection: str, name: str) -> str:
@@ -32,8 +38,8 @@ def index_status(collection: str, name: str) -> str:
     try:
         found = next((i for i in coll.list_search_indexes() if i["name"] == name), None)
     except Exception:
-        # `mongod` community não tem list_search_indexes. Não é erro de operação,
-        # é ausência de capacidade — o frontend precisa distinguir os dois casos.
+        # `mongod` community não tem `list_search_indexes`. Não é erro de
+        # operação, é ausência de capacidade — a tela precisa distinguir os dois.
         return "UNSUPPORTED"
     return found["status"] if found else "MISSING"
 
@@ -44,236 +50,205 @@ def _require(collection: str, name: str) -> None:
         raise IndexUnavailable(name, st)
 
 
-def resolve_entity(
-    query: str,
-    limit: int = 10,
-    person_ids: list[str] | None = None,
-    ring_ids: list[str] | None = None,
-    scope: str = "base",
-) -> dict[str, Any]:
-    """Entity resolution difusa em `people.name`.
-
-    `compound.should` com três cláusulas: termo exato (pontua mais alto), fuzzy
-    com `maxEdits: 2` (pega o erro de digitação) e autocomplete (pega digitação
-    parcial). O `$graphLookup` por igualdade nunca acharia o gêmeo com typo — é
-    por isso que este passo existe no roteiro.
-
-    ## Escopo, e por que o padrão é a base inteira
-
-    Buscar "Diego" e receber Diegos que não têm nada a ver com a investigação é
-    ruído — daí o escopo `rede`, que restringe aos nós que estão na tela.
-
-    Mas o padrão continua sendo `base`, de propósito: **o caso que dá valor a
-    este painel é justamente um registro que o grafo NÃO alcança.** O gêmeo com
-    erro de digitação não tem aresta nenhuma ligando-o à rede; se a busca fosse
-    sempre escopada, ele nunca apareceria e o passo perderia o sentido.
-
-    A saída resolve o ruído de outro jeito: todo resultado diz se está **na rede**
-    da tela e a quantos saltos, ou fora dela. O que estiver na rede vem primeiro.
-    """
-    s = get_settings()
-    _require("people", s.search_index)
-
-    compound: dict[str, Any] = {
+def _clausulas(campo: str, query: str) -> dict[str, Any]:
+    """As três cláusulas que resolvem grafia divergente, iguais nos dois índices."""
+    return {
         "should": [
-            {"text": {"query": query, "path": "name", "score": {"boost": {"value": 3}}}},
-            {
-                "text": {
-                    "query": query,
-                    "path": "name",
-                    "fuzzy": {"maxEdits": 2, "prefixLength": 1},
-                }
-            },
-            {"autocomplete": {"query": query, "path": "name"}},
+            {"text": {"query": query, "path": campo, "score": {"boost": {"value": 3}}}},
+            {"text": {"query": query, "path": campo, "fuzzy": {"maxEdits": 2, "prefixLength": 1}}},
+            {"autocomplete": {"query": query, "path": campo}},
         ],
         "minimumShouldMatch": 1,
     }
 
-    escopado = scope == "rede" and bool(person_ids)
-    # `ring_id` é `token` no índice, então o filtro roda DENTRO do `$search` — o
-    # servidor nem pontua quem está fora da rede. Sem anel (rede da população
-    # limpa) não há token para filtrar, e sobra o `$match` por `_id` abaixo.
-    if escopado and ring_ids:
-        compound["filter"] = [{"in": {"path": "ring_id", "value": ring_ids}}]
 
-    pipeline: list[dict[str, Any]] = [{"$search": {"index": s.search_index, "compound": compound}}]
-    if escopado:
-        # Segunda guarda, exata: só os nós que estão de fato na tela. O `$limit`
-        # vem depois, senão o corte aconteceria antes do filtro.
-        pipeline.append({"$limit": max(limit * 40, 400)})
-        pipeline.append({"$match": {"_id": {"$in": person_ids}}})
-    pipeline.append({"$limit": limit})
-    pipeline.append(
-        {
-            "$project": {
-                "name": 1,
-                "ring_id": 1,
-                "risk_flags": 1,
-                "near_duplicate_of": 1,
-                "city": {"$first": "$addresses.city"},
-                "score": {"$meta": "searchScore"},
-            }
-        }
-    )
+def _busca_socios(
+    query: str, limit: int, node_ids: set[str], escopo_apenas: bool = True
+) -> list[dict[str, Any]]:
+    """Sócios pessoa física.
 
-    started = time.perf_counter()
-    results = with_retry(lambda: list(get_db().people.aggregate(pipeline)), "resolve_entity")
+    Buscar só razão social deixava metade do grafo inalcançável: quem descobre um
+    grupo econômico frequentemente parte do **nome de uma pessoa** — o sócio que
+    aparece em empresas de grupos diferentes —, não do CNPJ. Digitar o nome de um
+    sócio que está desenhado na tela e não receber nada é o tipo de furo que
+    encerra a credibilidade da demonstração.
 
-    na_tela = set(person_ids or [])
-
-    # No modo `base`, ordenar depois não basta.
-    #
-    # O `$search` corta pelos 10 mais relevantes ANTES de a gente olhar quem está
-    # na rede. Buscar "Diego" numa base de 150 mil devolve dez Diegos aleatórios,
-    # e o Diego que está na tela — o único que interessa — fica de fora do corte.
-    # Reordenar não conserta o que nunca chegou.
-    #
-    # Então roda-se uma segunda passada, escopada na rede (barata: o filtro por
-    # `ring_id` é token no índice, e a rede tem dezenas de nós), e o resultado
-    # dela entra na frente. A base continua ali embaixo, que é o que mantém o
-    # gêmeo com erro de digitação alcançável.
-    if not escopado and na_tela and ring_ids:
-        da_rede = resolve_entity(
-            query, limit=limit, person_ids=person_ids, ring_ids=ring_ids, scope="rede"
-        )["results"]
-        vistos = {r["_id"] for r in da_rede}
-        results = da_rede + [r for r in results if r["_id"] not in vistos]
-
-    for r in results:
-        r["na_rede"] = r["_id"] in na_tela
-    results.sort(key=lambda r: (not r["na_rede"], -r["score"]))
-
-    return {
-        "query": query,
-        "index": s.search_index,
-        "scope": "rede" if escopado else "base",
-        "scoped_to": len(na_tela) if escopado else None,
-        "results": results[: limit * 2 if not escopado else limit],
-        "na_rede": sum(1 for r in results if r["na_rede"]),
-        "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
-    }
-
-
-def embed_query(text: str) -> list[float]:
-    s = get_settings()
-    if not s.voyage_api_key:
-        raise IndexUnavailable(s.vector_index, "NO_EMBEDDING_KEY")
-    r = httpx.post(
-        "https://api.voyageai.com/v1/embeddings",
-        headers={"Authorization": f"Bearer {s.voyage_api_key}"},
-        json={
-            "input": [text],
-            "model": s.embedding_model,
-            "output_dimension": s.embedding_dimensions,
-            "input_type": "query",
-        },
-        timeout=30.0,
-    )
-    r.raise_for_status()
-    return r.json()["data"][0]["embedding"]
-
-
-def similar_reasons(
-    text: str,
-    limit: int = 8,
-    ring_only: bool = False,
-    ring_ids: list[str] | None = None,
-    scope: str = "rede",
-) -> dict[str, Any]:
-    """Vector Search sobre `transactions.reason_embedding`.
-
-    ## Que pergunta este painel responde
-
-    Solto sobre a base inteira, ele vira uma curiosidade: "o motor entende
-    sinônimo". Verdade, mas não é trabalho de investigação, e a plateia sente isso.
-
-    Escopado na rede que está na tela, ele responde algo que o analista realmente
-    pergunta: **"que justificativas essas contas usam para mover dinheiro?"** A
-    resposta útil não é uma frase, é o padrão — a mesma desculpa reescrita de N
-    formas diferentes pelos membros do anel. Busca por palavra-chave não agrupa
-    isso, porque as frases não dividem palavra nenhuma.
-
-    `ring_id` é campo de filtro do índice vetorial, então o escopo roda dentro do
-    `$vectorSearch`: o ANN só percorre os vetores da rede, em vez de achar 400
-    vizinhos na base e descartar quase todos depois.
+    Degrada sozinho: se o índice de pessoas não estiver pronto, a busca de
+    empresas continua respondendo.
     """
     s = get_settings()
-    _require("transactions", s.vector_index)
-    query_vector = embed_query(text)
-
-    # `reason_text` vem de um pool de templates, então milhares de transações
-    # dividem o mesmo texto — e o mesmo vetor. Sem agrupar, o painel devolveria a
-    # mesma frase seis vezes. Buscamos um bloco maior e colapsamos por texto,
-    # mantendo o melhor score e a contagem de ocorrências (que é informação útil:
-    # "esse motivo aparece 24 mil vezes na base").
-    escopado = scope == "rede" and bool(ring_ids)
-    fetch = max(limit * 40, 400)
-    # `numCandidates` alto no modo escopado não é chute.
-    #
-    # O `$vectorSearch` percorre o grafo HNSW da coleção INTEIRA e aplica o filtro
-    # durante a travessia. Um filtro muito seletivo — uma rede de 30 pessoas
-    # dentro de 600 mil transações — faz quase todo candidato ser descartado, e
-    # com `numCandidates` baixo a busca esgota a lista antes de juntar resultado.
-    # Medido: com 360 candidatos a rede devolvia **um** motivo; o dado tinha nove.
-    #
-    # É a armadilha clássica de ANN com filtro seletivo, e vale contar na demo:
-    # a poda por filtro é barata de escrever e cara de dimensionar.
-    #
-    # 10.000 é o teto do servidor (`"numCandidates" must be within bounds
-    # [1..10000]`), não um número escolhido — o que também é o limite prático de
-    # quão seletivo um filtro pode ser aqui. Ver LIMITATIONS.md.
-    MAX_CANDIDATES = 10_000
-    candidates = MAX_CANDIDATES if escopado else min(fetch * 3, MAX_CANDIDATES)
-    stage: dict[str, Any] = {
-        "index": s.vector_index,
-        "path": "reason_embedding",
-        "queryVector": Binary.from_vector(query_vector, BinaryVectorDtype.FLOAT32),
-        "numCandidates": candidates,
-        "limit": fetch,
-    }
-    if escopado:
-        stage["filter"] = {"ring_id": {"$in": ring_ids}}
-    elif ring_only:
-        stage["filter"] = {"ring_id": {"$ne": None}}
-
+    if index_status("people", s.people_search_index) != "READY":
+        return []
+    compound = dict(_clausulas("name", query))
+    if escopo_apenas:
+        pessoas_na_tela = [i for i in node_ids if isinstance(i, str) and i.startswith("person_")]
+        if not pessoas_na_tela:
+            return []
+        compound["filter"] = [{"in": {"path": "_id", "value": pessoas_na_tela}}]
     pipeline = [
-        {"$vectorSearch": stage},
-        {"$set": {"score": {"$meta": "vectorSearchScore"}}},
-        {
-            "$group": {
-                "_id": "$reason_text",
-                "score": {"$max": "$score"},
-                "ocorrencias_no_bloco": {"$sum": 1},
-                "amount": {"$avg": "$amount"},
-                "ring_id": {"$max": "$ring_id"},
-                "exemplo": {"$first": "$_id"},
-            }
-        },
-        {"$sort": {"score": -1}},
+        {"$search": {"index": s.people_search_index, "compound": compound}},
         {"$limit": limit},
         {
             "$project": {
-                "_id": "$exemplo",
-                "reason_text": "$_id",
-                "amount": {"$round": ["$amount", 2]},
-                "ring_id": 1,
-                "score": 1,
-                "ocorrencias_no_bloco": 1,
+                "name": 1,
+                "occupation": 1,
+                "age_band": 1,
+                "income_band": 1,
+                "score": {"$meta": "searchScore"},
             }
         },
     ]
+    try:
+        achados = with_retry(lambda: list(get_db().people.aggregate(pipeline)), "resolve_person")
+    except Exception:  # noqa: BLE001 — sócio é complemento, nunca derruba a busca
+        return []
+
+    db = get_db()
+    saida = []
+    for p in achados:
+        # Quantas empresas essa pessoa controla? É o número que diz se vale olhar:
+        # um sócio-administrador de sete empresas em grupos diferentes é uma
+        # pergunta, um sócio de uma é cadastro.
+        n = db.ownership.count_documents({"owner_id": p["_id"], "owner_type": "individual"})
+        saida.append(
+            {
+                "_id": p["_id"],
+                "kind": "person",
+                "label": p.get("name"),
+                "occupation": p.get("occupation"),
+                "age_band": p.get("age_band"),
+                "income_band": p.get("income_band"),
+                "companies": n,
+                "score": p["score"],
+                "in_group": p["_id"] in node_ids,
+            }
+        )
+    return saida
+
+
+def resolve_company(
+    query: str,
+    limit: int = 10,
+    company_ids: list[str] | None = None,
+    node_ids: list[str] | None = None,
+    escopo_apenas: bool = True,
+) -> dict[str, Any]:
+    """Busca difusa em `razao_social` e no nome dos sócios, **escopada ao grafo**.
+
+    `compound.should` com três cláusulas: termo exato (pontua mais alto), fuzzy
+    com `maxEdits: 2` (pega grafia divergente) e autocomplete (pega digitação
+    parcial).
+
+    ## Por que o padrão é escopado
+
+    A tela mostra um grupo econômico. Digitar "ana" e receber vinte pessoas e
+    empresas que não têm relação nenhuma com o que está desenhado não é busca, é
+    ruído: o analista precisa parear cada linha com o grafo mentalmente, e não tem
+    como. Por padrão a busca filtra pelos ids que estão na tela — empresas e
+    sócios —, usando `compound.filter` no próprio índice.
+
+    `escopo_apenas=False` abre para a base inteira, e existe por um motivo
+    específico: **entity resolution**. Uma empresa que ainda não está no grafo pode
+    pertencer ao grupo por um vínculo que o cadastro não registra, e achá-la é
+    exatamente o trabalho de quem investiga. Isso é uma ação deliberada, com o
+    resultado marcado como "fora do grupo", não o comportamento padrão.
+
+    Cada resultado diz se está no grupo da tela. A nota do Lucene não desempata
+    homônimos — empate entre linhas que casam do mesmo jeito é correto, não é
+    defeito —, então "está no grupo" é o critério de ordenação mais forte.
+    """
+    s = get_settings()
+    _require("companies", s.company_search_index)
+
+    # Duas buscas, escopada primeiro.
+    #
+    # A busca global sozinha é honesta mas inútil na tela: "Farias Sousa" casa com
+    # milhares de razões sociais, todas com a mesma nota, e a empresa do grupo que
+    # o analista está olhando não aparece em lugar nenhum das dez primeiras. O
+    # `compound.filter` por `_id` restringe a primeira busca ao grupo em tela — é
+    # por isso que `_id` está mapeado como `token` no índice.
+    escopo = [i for i in (company_ids or []) if isinstance(i, str)]
+
+    def _busca(filtro_ids: list[str] | None) -> list[dict[str, Any]]:
+        compound = dict(_clausulas("razao_social", query))
+        if filtro_ids:
+            compound["filter"] = [{"in": {"path": "_id", "value": filtro_ids}}]
+        return [
+            {"$search": {"index": s.company_search_index, "compound": compound}},
+            {"$limit": limit},
+        ]
+
+    # Escopado: uma consulta só, filtrada. Global: a busca ampla, com os acertos
+    # do grupo promovidos ao topo (ver abaixo).
+    pipeline: list[dict[str, Any]] = _busca(escopo if escopo_apenas else None) + [
+        {
+            "$lookup": {
+                "from": "credit_exposure",
+                "localField": "_id",
+                "foreignField": "company_id",
+                "as": "cred",
+            }
+        },
+        {
+            "$project": {
+                "razao_social": 1,
+                "cnpj": 1,
+                "uf": 1,
+                "porte": 1,
+                "situacao": 1,
+                "is_holding": 1,
+                "cnae_descricao": 1,
+                "credit_status": 1,
+                "limite": {"$first": "$cred.limite"},
+                "vencido": {"$first": "$cred.vencido"},
+                "rating": {"$first": "$cred.rating"},
+                "score": {"$meta": "searchScore"},
+            }
+        },
+    ]
+
     started = time.perf_counter()
-    results = with_retry(lambda: list(get_db().transactions.aggregate(pipeline)), "similar_reasons")
+    db = get_db()
+    results = with_retry(lambda: list(db.companies.aggregate(pipeline)), "resolve_company")
+
+    if escopo and not escopo_apenas:
+        # O restante do pipeline (hidratação e projeção) é o mesmo; só a primeira
+        # etapa muda. Os acertos do grupo vão para o topo, sem reordenar por nota:
+        # "está no grupo que você está olhando" é um critério mais forte do que
+        # qualquer diferença de relevância entre dois homônimos.
+        no_grupo = with_retry(
+            lambda: list(db.companies.aggregate(_busca(escopo) + pipeline[2:])),
+            "resolve_company escopado",
+        )
+        vistos = {r["_id"] for r in no_grupo}
+        results = no_grupo + [r for r in results if r["_id"] not in vistos]
+        results = results[:limit]
+    na_tela = set(company_ids or [])
+    todos_na_tela = set(node_ids or []) | na_tela
+    for r in results:
+        r["kind"] = "company"
+        r["label"] = r.get("razao_social")
+        r["in_group"] = r["_id"] in na_tela
+
+    socios = _busca_socios(query, limit, todos_na_tela, escopo_apenas)
+    results = results + socios
+    # Quem está no grupo da tela vem primeiro, e empresa antes de sócio em caso de
+    # empate: o CNPJ é a chave de negócio da esteira de crédito.
+    results.sort(key=lambda r: (not r["in_group"], r["kind"] != "company", -r["score"]))
+    results = results[: limit * 2]
+
     return {
-        "query": text,
-        "index": s.vector_index,
-        "model": s.embedding_model,
-        "dimensions": s.embedding_dimensions,
-        "scope": "rede" if escopado else "base",
-        "scoped_to": ring_ids if escopado else None,
-        # Quantas maneiras diferentes de dizer a mesma coisa vieram — é o número
-        # que sustenta a leitura, não o score de cada linha.
-        "formas_distintas": len(results),
+        "query": query,
+        "index": s.company_search_index,
+        "people_index": s.people_search_index,
+        "companies_found": sum(1 for r in results if r["kind"] == "company"),
+        "people_found": sum(1 for r in results if r["kind"] == "person"),
+        "scoped": escopo_apenas,
+        "score_note": (
+            "Relevância do Lucene: não tem unidade nem teto. Linhas que casam do mesmo "
+            "jeito no mesmo campo tiram a mesma nota — empate aqui é correto, não é defeito."
+        ),
         "results": results,
+        "in_group": sum(1 for r in results if r["in_group"]),
         "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
     }

@@ -1,31 +1,49 @@
 #!/bin/bash
 # Pipeline completo de dados, na ordem correta. Idempotente de ponta a ponta.
+#
+# A ordem importa em um ponto: `generate_ownership.py` lê `people` para sortear os
+# sócios pessoa física. Rodar fora de ordem gera uma base societária sem sócios.
 set -euo pipefail
 BASE="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$BASE/.venv/bin/python"
-PEOPLE="${PEOPLE:-150000}"
-TXNS="${TXNS:-600000}"
-RINGS="${RINGS:-40}"
+PEOPLE="${PEOPLE:-800000}"
+COMPANIES="${COMPANIES:-1200000}"
+GROUPS="${GROUPS:-40000}"
+SHOWCASE="${SHOWCASE:-40}"
 
-echo "▶ 1/4 população sintética ($PEOPLE pessoas, $TXNS transações)"
-"$PY" "$BASE/data-generator/generate_synthetic_data.py" --people "$PEOPLE" --transactions "$TXNS" "$@"
+# Diz em voz alta o volume que vai gerar, e de onde veio cada número.
+#
+# Uma execução herdou `GROUPS=20` do ambiente e produziu 1.049 participações
+# entre PJ em vez de 249 mil — uma base que carrega igual, roda igual e mostra
+# um grafo vazio na hora da demo. Volume herdado em silêncio é o pior tipo de
+# defeito: não falha, só entrega menos.
+for var in PEOPLE COMPANIES GROUPS SHOWCASE; do
+  if [[ -n "${!var+x}" && -n "$(printenv "$var" || true)" ]]; then
+    echo "   $var=$(printenv "$var")  (do ambiente)"
+  else
+    echo "   $var=${!var}  (padrão)"
+  fi
+done
 
-echo "▶ 2/4 índices B-tree"
+echo "▶ 1/5 sócios pessoa física ($PEOPLE)"
+"$PY" "$BASE/data-generator/generate_people.py" --people "$PEOPLE" "$@"
+
+echo "▶ 2/5 base societária ($COMPANIES empresas, $GROUPS grupos)"
+"$PY" "$BASE/data-generator/generate_ownership.py" --companies "$COMPANIES" --groups "$GROUPS" --showcase "$SHOWCASE"
+
+echo "▶ 3/5 hierarquia comercial (gerentes e assessores)"
+"$PY" "$BASE/data-generator/generate_advisors.py"
+
+echo "▶ 4/5 índices B-tree"
 mongosh "$(grep '^MONGODB_URI=' "$BASE/.env" | cut -d= -f2-)" --quiet "$BASE/schema/indexes.js"
 
-echo "▶ 3/4 redes de fraude ($RINGS redes)"
-"$PY" "$BASE/data-generator/inject_fraud_rings.py" --rings "$RINGS" --ring-size-min 20 --ring-size-max 30
-
-echo "▶ 4/4 materialização de arestas (recria os índices de `connections`)"
-"$PY" "$BASE/data-generator/materialize_connections.py" --rebuild
-
-echo "▶ conferindo os índices de traversal"
+echo "▶ 5/5 conferindo os índices do traversal"
 mongosh "$(grep '^MONGODB_URI=' "$BASE/.env" | cut -d= -f2-)" --quiet --eval '
-db = db.getSiblingDB(process.env.MONGODB_DB || "graph_fraud_ring");
-const nomes = db.connections.getIndexes().map(i => i.name);
-for (const req of ["from_1", "to_1"]) {
-  if (!nomes.includes(req)) { print("FALTA o índice " + req + " em connections"); quit(1); }
+db = db.getSiblingDB(process.env.MONGODB_DB || "graph_grupo_economico");
+const nomes = db.ownership.getIndexes().map(i => i.name);
+for (const req of ["owner_id_1", "owned_id_1"]) {
+  if (!nomes.includes(req)) { print("FALTA o índice " + req + " em ownership"); quit(1); }
 }
-print("  ok: " + nomes.join(", "));'"
+print("  ok: " + nomes.join(", "));'
 
-echo "✅ dados prontos. Próximo: schema/search_indexes.py e data-generator/embed_reasons.py"
+echo "✅ dados prontos. Próximo: .venv/bin/python schema/search_indexes.py"

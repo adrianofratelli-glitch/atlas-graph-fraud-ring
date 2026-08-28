@@ -1,5 +1,9 @@
 # 03 — Interface and flows
 
+The interface is in **Brazilian Portuguese**: it is presented to Brazilian banks,
+and CNPJ, razão social, sócio and rating are the words those teams use. The
+repository documentation stays in English.
+
 The visual design follows a token set shared across the demonstration projects:
 dark background, green as the signal for action and success, blue for information,
 amber for warning and red for risk. `src/pov-signature.css` carries that signature
@@ -7,13 +11,14 @@ and is imported after the application stylesheet.
 
 ## Stage mode
 
-One screen. The first viewport holds **one thesis** (a transaction on its own looks
-legitimate), **one action** (the traversal depth) and **one piece of evidence** (the
-graph with ring nodes in red and the measured response time).
+One screen. The first viewport holds **one thesis** (a company on its own looks
+small and clean), **one action** (the traversal depth) and **one piece of
+evidence** (the group graph with the consolidated exposure and the measured
+response time).
 
 Anything that decides nothing for the presenter is out of the way: the executed
-query lives in a `<details>`, and the Search, Vector and alert panels sit beside
-the graph, in script order.
+query lives in a `<details>`, and the Search, Concentration, Visibility and alert
+panels sit beside the graph, in script order.
 
 ## Layout — one screen, no scrolling
 
@@ -22,7 +27,7 @@ the graph, in script order.
 ├──────────┬────────────────────────────────────────┬────────────────────┤
 │ controls │ metrics: nodes · edges · in ring ·      │ inspector (tabs)   │
 │          │          blocked · time · hop · legend  │ ┌────────────────┐ │
-│ entry    │ ┌────────────────────────────────────┐  │ │Node│Search│Sem…│ │
+│ entry    │ ┌────────────────────────────────────┐  │ │Node│Search│Conc│Vis│ │
 │ depth    │ │                                    │  │ ├────────────────┤ │
 │ edges    │ │   canvas (takes the remaining      │  │ │ node detail    │ │
 │ action   │ │           height)   [+] [−] [⤢]    │  │ │ neighbour chips│ │
@@ -67,6 +72,24 @@ distance.
 
 Framing controls (`+`, `−`, `⤢`) sit over the canvas: after dragging or zooming,
 the presenter returns to the framing without reloading.
+
+## Dragging moves what you dragged, and nothing else
+
+The first version enabled the physics solver on `dragStart` and froze it once the
+engine settled. It reads well as a description and behaves badly in the hand:
+moving one node put the whole graph in motion, and the analyst lost the spatial
+map they had just built. In a demo that reads as instability.
+
+Physics is now off permanently. The dragged node stays exactly where it was
+dropped, and a local pass pushes **only** the nodes it landed on top of, by the
+minimum distance, with a short cascade (two levels) and a per-node displacement
+cap. Measured on the demo group: dragging one company moves 4 of 35 nodes — the
+dragged one and the three that had to get out of the way.
+
+A second pass runs once after the initial layout, and it only moves nodes **on the
+X axis**, within each level. Vertical position is the ownership level; pushing a
+node up or down to fix an overlap would trade a cosmetic problem for a false
+statement about who controls whom.
 
 ## Pinning a node, and why hover must not win
 
@@ -191,6 +214,61 @@ answers "which of these Diegos is mine?".
 The scope reaches the engine through `ring_id`, which is a `token` on the search
 index and a filter field on the vector index. No index had to be rebuilt.
 
+## The visibility panel
+
+The second scenario needed no new screen: it is a tab beside the others, and it
+holds three things — a list of example users, the scope and book of whoever is
+selected, and the verdict for the company currently on the graph.
+
+Two decisions worth defending:
+
+**The user list is a list of buttons, not a dropdown.** The whole point is the
+*contrast* between a manager and an advisor, and a dropdown hides the other option
+behind a click. Each row is a real `<button>`, so keyboard and screen reader work;
+the styling only removes the button look, never the behaviour.
+
+**The verdict follows the company already on screen.** Selecting a user
+re-evaluates the CNPJ under analysis, so the boundary is demonstrated on the same
+company the customer has been looking at for the last five minutes — not on an
+abstract example. In the first showcase group the members are deliberately split
+between two advisors under different managers, so the boundary cuts through the
+middle of an economic group.
+
+The panel reports the scope size and the elapsed time, because the argument is that
+the scope was *derived* — one aggregation, walking down the tree — rather than read
+from a stored list.
+
+## Every list points at the graph
+
+The rail panels are not read-only lists. Clicking a row sets a highlight: the nodes
+it refers to get an emphasised border, every other node dims, and the canvas centres
+on the set. Clicking the same row again releases it, and changing company, depth or
+tab clears it — a highlight that outlives the graph it referred to is worse than no
+highlight.
+
+Two details that took a second pass:
+
+- **The zoom is clamped.** `fit({nodes})` on a single node zooms to maximum and the
+  context disappears: the presenter gets a huge box in the middle of the screen with
+  no idea where it sits in the chain. It now centres on the set and holds the scale
+  between 0.55 and 0.9.
+- **A result outside the graph does nothing.** Search can be opened to the whole
+  base, and those hits have no node to point at. Flashing the graph for them would
+  be worse than not reacting.
+
+## The visibility boundary is drawn on the graph
+
+Selecting a user in the Visibility tab dims the companies of the group that fall
+outside that user's scope. Dimmed, not hidden: the company **is** in the economic
+group — what changes is who may see it. Hiding would answer a different question
+and quietly misrepresent the data.
+
+The cross-reference needs no new endpoint. The portfolio response already carries
+the scope (the user plus everyone below them) and every company node already
+carries the advisor who covers it, so the intersection happens on the client. That
+is also the honest architecture: the *decision* stays on the server (`can-see`),
+the *rendering* of it is a client concern.
+
 ## States
 
 | State | What the screen does |
@@ -201,11 +279,14 @@ index and a filter field on the vector index. No index had to be rebuilt.
 | Entry point with no links | empty canvas with text, not an infinite spinner |
 | Truncated result | notice pointing at `LIMITATIONS.md §4`, with the real edge count found |
 | No alerts yet | text saying which action produces one, not a mute void |
-| Flagging at a shallow depth | notice saying how many nodes this expansion would actually block |
+| Reviewing at a shallow depth | notice saying how many companies this expansion would actually flag |
+| Search with no hit inside the group | says so, and offers the checkbox that opens the search to the whole base — an empty list with no explanation reads as a broken index |
+| Analytical query saturated (429) | the panel says "saturated, try again", **not** "unavailable" — the backend caps concurrency per class and refuses early to protect the interactive path. Confusing backpressure with an outage sends the presenter debugging the wrong thing |
+| Account outside the user's scope | the visibility panel says **not visible** and gives the reason, naming the advisor who owns the account — a refusal has to explain itself, or it reads as a bug |
 
-No state is communicated by colour alone: a ring node has a thicker border and its
-`ring_id` in the panel on top of the red; a blocked node has a dashed border on top
-of the "Blocked" metric.
+No state is communicated by colour alone: a company under review has a dashed
+border on top of the metric, the subject of the query is labelled in the node
+panel, and the visibility verdict is a sentence, not a colour.
 
 ## Streaming
 
@@ -218,18 +299,21 @@ heartbeat every 15 s so the browser does not consider the idle connection dead;
 The full version is in [`docs/demo-script.md`](../demo-script.md), including the
 pre-demo checklist. Summary of the path through the screen:
 
-1. pick a clean account in the selector — small graph, nothing happening;
-2. switch to the account under suspicion, depth 1;
-3. go to 2, then 3 — the network appears whole, the red nodes close;
-4. uncheck edge types one at a time — without the device edge the network collapses
-   from 31 nodes to 3, which is the hypothesis being tested live;
-5. go to 4 and 5 — the graph saturates: time to talk about fan-out and the pruning
-   toggle;
-6. Atlas Search with the misspelled name that exact-equality `$graphLookup` would
-   never find, and the in-network/outside tags;
-7. Vector Search scoped to the ring — eight ways of saying the same thing;
-8. **Flag N nodes for investigation** — ACID transaction, with the case card and
+1. pick an applicant in the selector, depth 1 — five companies, nothing overdue;
+2. depth 2 — the group opens to 25 companies and the arrears appear in a branch the
+   applicant is not part of;
+3. the consolidated exposure panel: the number the credit decision needs, which is
+   in no single record;
+4. Atlas Search with a partner's name spelled differently, scoped to the group;
+5. Concentration — eight CNAE codes, and how many distinct businesses actually hide
+   behind them;
+6. the bridge shareholder: one individual in two groups the registry treats as
+   unrelated;
+7. **Open review** — ACID transaction over the whole group, with the case card and
    the dashed nodes on the graph;
-9. **Inject transaction into the network** — the alert appears via change stream;
-10. **Close case** and inject again — no alert, and the screen says that is correct;
+8. **Register ownership change** — the alert arrives over the change stream;
+9. **Close case** and register again — no alert, and the screen says that is
+   correct;
+10. switch to **Visibility**: manager, then advisor, then the refusal on the same
+    company;
 11. close on architecture: one less system to operate, synchronise and secure.

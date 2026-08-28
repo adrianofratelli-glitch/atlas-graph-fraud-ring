@@ -1,6 +1,21 @@
 # ADR 0003 — Incremental edge maintenance via the change stream
 
-**Status:** accepted · **Date:** 2026-08-26 (revised 2026-08-27)
+**Status:** superseded · **Date:** 2026-08-26 (superseded 2026-08-28)
+
+> **Why it no longer applies, and why it is kept.** This decision belonged to the
+> earlier version of the project, where the graph was a *materialised* edge
+> collection derived from transactions — shared device, shared address, shared
+> destination key — and therefore had a staleness problem to solve.
+>
+> In the current model the ownership edge **is** the source data: `ownership` is
+> written by the registry, not derived from anything, so there is no materialised
+> graph to keep fresh and no batch to outrun. The change stream is still there, but
+> it raises the alert rather than maintaining an edge.
+>
+> The record is kept because the reasoning transfers whole to any project that does
+> materialise a graph, and because the one derived field that survived —
+> `advisor_id` on `credit_exposure` — is maintained by the generator, with a named
+> owner, precisely because of what this ADR argues below.
 
 ## Context
 

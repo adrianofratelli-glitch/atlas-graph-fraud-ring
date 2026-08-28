@@ -36,7 +36,7 @@ def get_client() -> MongoClient:
         serverSelectionTimeoutMS=s.server_selection_timeout_ms,
         connectTimeoutMS=s.server_selection_timeout_ms,
         retryWrites=True,
-        appname="atlas-graph-fraud-ring",
+        appname="atlas-graph-grupo-economico",
     )
 
 

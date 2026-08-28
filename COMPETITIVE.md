@@ -16,6 +16,30 @@ to qualify it. True for *graph-first* workloads with heavy continuous algorithms
 False for most enterprise cases, where the graph is an **investigative lens over
 data that is already operational in MongoDB**.
 
+## Deciding first: is this workload even a candidate?
+
+Run this table before the comparison table. It is the honest filter, and it also
+protects you: if the customer's real access pattern is dense and exploratory, an
+argument for replacement will not survive the POC.
+
+| Signal | Points to a dedicated graph database | Points to MongoDB |
+|---|---|---|
+| Query pattern | exploratory, dense, deep multi-hop; needs graph algorithms (PageRank, community detection, generic shortest path) | point lookup by business key over a shallow tree (1–10 levels) |
+| The customer's actual bottleneck | traversal and algorithm complexity | ingestion volume, licence and on-prem infrastructure cost, operations |
+| Query frequency | high, ad-hoc, analytical | low to moderate, predictable, operational |
+| Depth in practice | unbounded, discovered by exploring | 2 to 4 hops answers most questions |
+
+**This POV was built deliberately for the right-hand column.** Both scenarios it
+demonstrates — the ownership chain behind a credit decision, and the commercial
+hierarchy that decides who may see which account — are shallow trees queried by
+business key. For the left-hand column the honest answer stays co-existence, and
+the section at the end of this document says when.
+
+The corollary matters for how you sell it: on a shallow tree the traversal costs
+single-digit milliseconds, so the response time is decided by **how many times the
+application talks to the cluster**, and the total cost by **how fast the base
+loads**. Both of those are shown, measured, in `queries/benchmarks.md`.
+
 ## Comparison table
 
 | Dimension | MongoDB (`$graphLookup`) | Neo4j | Amazon Neptune |

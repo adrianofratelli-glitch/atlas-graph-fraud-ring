@@ -1,159 +1,201 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import GraphCanvas from './GraphCanvas'
 import { api } from './api'
 
 const DEPTHS = [1, 2, 3, 4, 5, 6]
-const EDGE_TYPES = [
-  ['shares_device', 'Device', '#0498ec'],
-  ['shares_address', 'Address', '#ffc010'],
-  ['same_pix_counterparty', 'Destination PIX key', '#00ed64'],
-]
 const TABS = [
-  ['node', 'Node'],
-  ['search', 'Search'],
-  ['vector', 'Semantic'],
-  ['alerts', 'Alerts'],
+  ['company', 'Empresa'],
+  ['search', 'Busca'],
+  ['semantic', 'Concentração'],
+  ['visibility', 'Visibilidade'],
+  ['alerts', 'Alertas'],
 ]
 
-const fmt = (n) => (n == null ? '—' : n.toLocaleString('en-US'))
-
-// Valor compacto para a barra de métricas: numa tela de projetor, "522k" é lido
-// de relance e "521,684.37" não é. O número exato fica no cartão do caso.
+const fmt = (n) => (n == null ? '—' : n.toLocaleString('pt-BR'))
+const money = (n, cur = 'R$') => `${cur} ${fmt(Math.round(n ?? 0))}`
+// Valor compacto para a barra de métricas: numa tela de projetor "96M" é lido de
+// relance e "96,326,588" não é. O número exato fica no cartão.
 const compact = (n) =>
   n == null ? '—' : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : Math.round(n)
-
-// Paráfrases que NÃO existem no corpus. Se a frase da consulta estivesse lá
-// literalmente, o primeiro resultado seria ela mesma e a busca não provaria nada.
-// Uma por escopo, porque a rede e a base falam de coisas diferentes: o anel
-// justifica repasses informais, a população legítima paga aluguel.
-const SUGESTAO_VETOR = {
-  rede: 'informal settlement of amounts between people, no signed contract',
-  base: 'I paid the monthly amount for the house I rent',
-}
 
 export default function App() {
   const [health, setHealth] = useState(null)
   const [entry, setEntry] = useState(null)
-  const [subject, setSubject] = useState('')
-  const [depth, setDepth] = useState(1)
-  const [types, setTypes] = useState(EDGE_TYPES.map(([k]) => k))
-  const [prune, setPrune] = useState(true)
-  const [net, setNet] = useState(null)
+  const [cnpj, setCnpj] = useState('')
+  const [depth, setDepth] = useState(3)
+  const [group, setGroup] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const [caseInfo, setCaseInfo] = useState(null)
-  const [alerts, setAlerts] = useState([])
-  const [search, setSearch] = useState({ q: '', out: null, degraded: null, scope: 'base' })
-  const [vector, setVector] = useState({ text: '', out: null, degraded: null, scope: 'rede' })
-  const [tab, setTab] = useState('node')
-  const [picked, setPicked] = useState(null)
-  const [hovered, setHovered] = useState(null)
   const [caseDetail, setCaseDetail] = useState(null)
-  const [coaf, setCoaf] = useState(null)
+  const [alerts, setAlerts] = useState([])
   const [lastSim, setLastSim] = useState(null)
-  const [exposure, setExposure] = useState(null)
+  const [search, setSearch] = useState({ q: '', out: null, degraded: null, todaBase: false })
+  const [conc, setConc] = useState({ out: null, degraded: null, saturado: null, loading: false })
+  const [tab, setTab] = useState('company')
+  const [picked, setPicked] = useState(null)
+  // O que uma aba lateral está apontando no grafo.
+  //
+  // Clicar num resultado tinha de fazer o apresentador procurar o nó com o dedo
+  // na tela. Agora a lista aponta: o conjunto destacado ganha borda, o resto
+  // apaga, e o canvas enquadra o que foi apontado.
+  const [destaque, setDestaque] = useState(null)
+  // Hierarquia comercial. `vis.user` é quem está olhando; tudo o mais é derivado
+  // disso no servidor — a tela nunca monta a lista de contas visíveis.
+  const [vis, setVis] = useState({ roster: [], user: null, out: null, check: null })
+  const [hovered, setHovered] = useState(null)
 
   useEffect(() => {
     api.health().then(setHealth).catch(() => setHealth({ status: 'offline' }))
     api.entryPoints().then(setEntry).catch(() => {})
+    api
+      .roster()
+      .then((r) => setVis((v) => ({ ...v, roster: r.users })))
+      .catch(() => {})
   }, [])
 
   useEffect(() => {
-    if (entry?.suspects?.length && !subject) setSubject(entry.suspects[0].person_id)
-  }, [entry, subject])
+    if (entry?.applicants?.length && !cnpj) setCnpj(entry.applicants[0].cnpj)
+  }, [entry, cnpj])
 
-  // Campos de busca já preenchidos com o caso do dataset: no palco, o apresentador
-  // só clica em Buscar. Digitar um nome com erro de digitação ao vivo é a forma
-  // mais fácil de errar a letra e a busca não achar nada.
+  // Destaque é sempre relativo ao grafo que está na tela: trocar de empresa, de
+  // profundidade ou de aba desfaz o apontamento em vez de deixá-lo mentindo.
+  useEffect(() => setDestaque(null), [cnpj, depth, tab])
+
   useEffect(() => {
-    const caso = entry?.entity_resolution_case
-    if (caso) setSearch((p) => (p.q ? p : { ...p, q: caso.typo_name }))
-    // Paráfrase que NÃO existe no corpus: se a frase de consulta estivesse lá
-    // literalmente, o primeiro resultado seria ela mesma e a demo não provaria nada.
-    setVector((p) => (p.text ? p : { ...p, text: SUGESTAO_VETOR[p.scope] }))
-  }, [entry])
+    if (!vis.user) return
+    let vivo = true
+    api
+      .portfolio(vis.user)
+      .then((out) => vivo && setVis((v) => ({ ...v, out, saturado: null })))
+      .catch((err) => vivo && setVis((v) => ({ ...v, out: null, saturado: err.saturado ?? null })))
+    return () => {
+      vivo = false
+    }
+  }, [vis.user])
+
+  useEffect(() => {
+    if (!vis.user || !cnpj) return
+    let vivo = true
+    api
+      .canSee(vis.user, cnpj)
+      .then((check) => vivo && setVis((v) => ({ ...v, check })))
+      .catch(() => vivo && setVis((v) => ({ ...v, check: null })))
+    return () => {
+      vivo = false
+    }
+  }, [vis.user, cnpj])
 
   useEffect(() => {
     const es = new EventSource('/api/alerts/stream')
     es.onmessage = (ev) => {
       const evento = JSON.parse(ev.data)
       setAlerts((prev) => [evento, ...prev].slice(0, 20))
-      // Só alerta de verdade troca a aba. Eventos de manutenção e de verificação
-      // sem alerta ficam disponíveis, mas não tiram o apresentador da tela em que
-      // ele está — uma rajada deles no meio de uma busca sequestrava a interface.
-      if (evento.type === 'ring_touch') setTab('alerts')
+      // Só alerta de verdade troca a aba. Verificação sem alerta fica na lista
+      // sem tirar o apresentador da tela em que ele está.
+      if (evento.type === 'group_changed') setTab('alerts')
     }
     return () => es.close()
   }, [])
 
-  const expand = useCallback(
-    async (d, s) => {
-      if (!s) return
-      setBusy(true)
-      setError(null)
-      try {
-        setNet(await api.network(s, { depth: d, edgeTypes: types, pruneHubs: prune }))
-      } catch (e) {
-        setError(e.message)
-        setNet(null)
-      } finally {
-        setBusy(false)
-      }
-    },
-    [types, prune]
+  // Quais empresas do grupo na tela o usuário selecionado alcança.
+  //
+  // Não precisa de endpoint novo: a carteira já devolve o escopo (o usuário mais
+  // todo mundo abaixo dele) e cada nó do grafo já carrega o assessor responsável.
+  // O cruzamento é local, e é ele que transforma a fronteira de visibilidade em
+  // algo que se **vê** no grafo em vez de se ler numa frase.
+  const escopoIds = useMemo(
+    () => new Set(vis.out ? [vis.out.user.id, ...vis.out.team.map((t) => t.id)] : []),
+    [vis.out]
   )
+  const foraDoEscopo = useMemo(() => {
+    if (!vis.out || !group?.nodes) return null
+    return new Set(
+      group.nodes
+        .filter((n) => n.kind === 'company' && !escopoIds.has(n.advisor_id))
+        .map((n) => n.id)
+    )
+  }, [vis.out, group, escopoIds])
+  const cobertura = useMemo(() => {
+    if (!foraDoEscopo || !group?.nodes) return null
+    const empresas = group.nodes.filter((n) => n.kind === 'company')
+    return {
+      total: empresas.length,
+      dentro: empresas.length - foraDoEscopo.size,
+      assessores: new Set(empresas.map((n) => n.advisor_id).filter(Boolean)).size,
+    }
+  }, [foraDoEscopo, group])
+
+  /** Aponta um conjunto de nós no grafo; clicar de novo no mesmo conjunto desfaz. */
+  const aponta = useCallback((ids) => {
+    const alvo = new Set((ids ?? []).filter(Boolean))
+    setDestaque((atual) => {
+      if (!alvo.size) return null
+      const igual =
+        atual && atual.size === alvo.size && [...alvo].every((i) => atual.has(i))
+      return igual ? null : alvo
+    })
+  }, [])
+
+  const carrega = useCallback(async (c, d) => {
+    if (!c) return
+    setBusy(true)
+    setError(null)
+    try {
+      setGroup(await api.group(c, d))
+    } catch (e) {
+      setError(e.message)
+      setGroup(null)
+    } finally {
+      setBusy(false)
+    }
+  }, [])
 
   useEffect(() => {
-    if (subject) expand(depth, subject)
+    if (cnpj) carrega(cnpj, depth)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [subject, depth, types, prune])
+  }, [cnpj, depth])
 
-  // Exposição financeira da rede na tela: quanto dinheiro passou por aquelas
-  // contas. É o número que responde "por que eu deveria me importar com essas 30
-  // contas?", e é medido — sai de `transactions`, não de projeção.
-  //
-  // Buscada depois da expansão, nunca junto: a agregação custa ~1 s e pendurá-la
-  // no traversal atrasaria justamente o passo que está sendo mostrado ao vivo.
-  useEffect(() => {
-    const ids = (net?.nodes ?? []).map((n) => n.id)
-    // `net?.stats` e não `stats`: a constante é declarada mais abaixo, e usá-la
-    // aqui cairia na zona morta temporal do `const` a cada render.
-    if (!ids.length || !net?.stats?.ring_nodes) {
-      setExposure(null)
-      return
+  const companyIds = useMemo(
+    () => (group?.nodes ?? []).filter((n) => n.kind === 'company').map((n) => n.id),
+    [group]
+  )
+  const byId = useMemo(() => new Map((group?.nodes ?? []).map((n) => [n.id, n])), [group])
+  const neighbours = useMemo(() => {
+    const m = new Map()
+    for (const e of group?.edges ?? []) {
+      if (!m.has(e.from)) m.set(e.from, new Set())
+      if (!m.has(e.to)) m.set(e.to, new Set())
+      m.get(e.from).add(e.to)
+      m.get(e.to).add(e.from)
     }
-    let vivo = true
-    api
-      .exposure(ids)
-      .then((e) => vivo && setExposure(e))
-      .catch(() => vivo && setExposure(null))
-    return () => {
-      vivo = false
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [net])
+    return m
+  }, [group])
 
-  // Recupera um caso já aberto no banco quando a tela recarrega.
-  //
-  // O `case_id` viaja junto com o nó, então a tela consegue se reconciliar com o
-  // servidor sozinha. Sem isso, dar F5 no meio da apresentação deixava as contas
-  // bloqueadas no banco e o botão "Close case" desabilitado — sem saída pela
-  // interface a não ser resetar a demo inteira.
+  // O nó fixado manda no painel; o hover só preenche quando nada está fixado.
+  const detail = byId.get(picked ?? hovered)
+  const pinned = Boolean(picked && byId.has(picked))
+  const stats = group?.stats
+  const exposure = group?.group_exposure
+  const subject = group?.subject
+
+  // Recupera uma revisão já aberta quando a tela recarrega: o `case_id` viaja
+  // junto com a empresa, então a tela se reconcilia com o servidor sozinha.
   useEffect(() => {
     if (caseInfo) return
-    const aberto = (net?.nodes ?? []).find((n) => n.flagged && n.case_id)
-    if (!aberto) return
+    const aberta = (group?.nodes ?? []).find((n) => n.credit_status === 'under_review' && n.case_id)
+    if (!aberta) return
     let vivo = true
     api
-      .caseDetail(aberto.case_id)
+      .caseDetail(aberta.case_id)
       .then((d) => {
         if (!vivo) return
         setCaseDetail(d)
         setCaseInfo({
-          case_id: aberto.case_id,
-          accounts_flagged: d.accounts.length,
-          people_flagged: d.case.people_flagged ?? d.people.length,
-          elapsed_ms: d.case.elapsed_ms ?? '—',
+          case_id: aberta.case_id,
+          companies_blocked: d.companies.length,
+          exposures_flagged: d.case.exposures_flagged,
+          elapsed_ms: '—',
           read_concern: 'snapshot',
           write_concern: 'majority',
         })
@@ -162,73 +204,35 @@ export default function App() {
     return () => {
       vivo = false
     }
-  }, [net, caseInfo])
+  }, [group, caseInfo])
 
-  // Os anéis presentes na expansão atual. `ring_id` é campo de filtro nos dois
-  // índices de busca, então é por ele que o escopo desce até o motor.
-  const ringIds = useMemo(
-    () => [...new Set((net?.nodes ?? []).map((n) => n.ring_id).filter(Boolean))],
-    [net]
-  )
-  const nodeIds = useMemo(() => (net?.nodes ?? []).map((n) => n.id), [net])
-
-  const ringNodes = useMemo(() => (net?.nodes ?? []).filter((n) => n.ring_id).map((n) => n.id), [net])
-  const byId = useMemo(() => new Map((net?.nodes ?? []).map((n) => [n.id, n])), [net])
-  const neighbours = useMemo(() => {
-    const m = new Map()
-    const seen = new Set()
-    for (const e of net?.edges ?? []) {
-      const key = [e.from, e.to].sort().join('|') + e.type
-      if (seen.has(key)) continue
-      seen.add(key)
-      if (!m.has(e.from)) m.set(e.from, new Set())
-      if (!m.has(e.to)) m.set(e.to, new Set())
-      m.get(e.from).add(e.to)
-      m.get(e.to).add(e.from)
-    }
-    return m
-  }, [net])
-
-  // O nó **fixado** manda no painel; o hover só preenche quando nada está fixado.
-  //
-  // Era o contrário, e por isso clicar num nó era inútil: bastava mover o mouse
-  // em direção ao painel para o hover trocar o conteúdo, e o analista nunca
-  // conseguia ler o nó que tinha escolhido. Clicar precisa parar o painel.
-  const detail = byId.get(picked ?? hovered)
-  const pinned = Boolean(picked && byId.has(picked))
-
-
-  const refreshNet = () => expand(depth, subject)
-
-  const doFlag = async () => {
-    if (!ringNodes.length) return
+  const doReview = async () => {
+    if (!companyIds.length) return
     setBusy(true)
     setError(null)
     try {
-      const info = await api.flag(ringNodes, `rede alcançada em ${depth} saltos a partir de ${subject}`)
+      const info = await api.openReview(
+        companyIds,
+        `grupo econômico alcançado em ${depth} níveis a partir do CNPJ ${cnpj}`,
+        exposure
+      )
       setCaseInfo(info)
-      setCoaf(null)
       setLastSim(null)
-      // O detalhe traz o antes/depois das contas: é o que torna o efeito da
-      // transação ACID visível em vez de uma linha de texto com o case_id.
       setCaseDetail(await api.caseDetail(info.case_id).catch(() => null))
-      await refreshNet()
+      await carrega(cnpj, depth)
     } catch (e) {
-      // 409 com `already_open`: o backend recusou porque já há caso aberto sobre
-      // estes nós. Em vez de mostrar erro, a tela traz aquele caso para a frente
-      // — o botão de encerrar fica ao lado, que é a saída que o analista quer.
       if (e.detail?.already_open && e.detail.case_id) {
         const d = await api.caseDetail(e.detail.case_id).catch(() => null)
         setCaseDetail(d)
         setCaseInfo({
           case_id: e.detail.case_id,
-          accounts_flagged: d?.accounts.length,
-          people_flagged: d?.people.length,
+          companies_blocked: d?.companies.length,
+          exposures_flagged: d?.case?.exposures_flagged,
           elapsed_ms: '—',
           read_concern: 'snapshot',
           write_concern: 'majority',
         })
-        setError('A case is already open on this network. Close it before opening another.')
+        setError('A credit review is already open on this group. Close it before opening another.')
       } else {
         setError(e.message)
       }
@@ -241,12 +245,11 @@ export default function App() {
     if (!caseInfo?.case_id) return
     setBusy(true)
     try {
-      await api.closeCase(caseInfo.case_id)
+      await api.closeReview(caseInfo.case_id)
       setCaseInfo(null)
       setCaseDetail(null)
-      setCoaf(null)
       setLastSim(null)
-      await refreshNet()
+      await carrega(cnpj, depth)
     } catch (e) {
       setError(e.message)
     } finally {
@@ -260,10 +263,9 @@ export default function App() {
       await api.reset()
       setCaseInfo(null)
       setCaseDetail(null)
-      setCoaf(null)
       setLastSim(null)
       setAlerts([])
-      await refreshNet()
+      await carrega(cnpj, depth)
     } catch (e) {
       setError(e.message)
     } finally {
@@ -271,21 +273,9 @@ export default function App() {
     }
   }
 
-  const doCoaf = async () => {
-    if (!caseInfo?.case_id) return
+  const doOwnershipChange = async () => {
     try {
-      setCoaf(await api.coaf(caseInfo.case_id))
-    } catch (e) {
-      setError(e.message)
-    }
-  }
-
-  // Injeta com OU sem o caso aberto. Sem caso, `expect_alert` volta falso e a
-  // tela diz que o silêncio é o resultado certo — é essa metade que prova que o
-  // alerta lê o estado em vez de disparar sozinho.
-  const doSimulate = async () => {
-    try {
-      const out = await api.simulate((net?.nodes ?? []).map((n) => n.id))
+      const out = await api.ownershipChange(companyIds)
       setLastSim(out)
       if (!out.expect_alert) setTab('alerts')
     } catch (e) {
@@ -293,217 +283,223 @@ export default function App() {
     }
   }
 
-  const doSearch = async (e, scope = search.scope) => {
+  const doSearch = async (e) => {
     e?.preventDefault()
     try {
-      const out = await api.searchPeople(search.q, { scope, personIds: nodeIds, ringIds })
-      setSearch((p) => ({ ...p, out, degraded: null, scope }))
+      const out = await api.searchCompanies(search.q, {
+        companyIds,
+        nodeIds: (group?.nodes ?? []).map((n) => n.id),
+        scopeOnly: !search.todaBase,
+      })
+      setSearch((p) => ({ ...p, out, degraded: null }))
     } catch (err) {
       setSearch((p) => ({ ...p, out: null, degraded: err.degraded ?? { status: err.message } }))
     }
   }
 
-  const doVector = async (e, scope = vector.scope) => {
-    e?.preventDefault()
-    try {
-      const out = await api.similarReasons(vector.text, { scope, ringIds })
-      setVector((p) => ({ ...p, out, degraded: null, scope }))
-    } catch (err) {
-      setVector((p) => ({ ...p, out: null, degraded: err.degraded ?? { status: err.message } }))
+  // Análise de concentração: automática, disparada quando o grupo muda. Não há
+  // caixa de texto — a pergunta é do grafo, não do apresentador.
+  useEffect(() => {
+    if (!companyIds.length) {
+      setConc({ out: null, degraded: null, saturado: null, loading: false })
+      return
     }
-  }
+    let vivo = true
+    setConc((p) => ({ ...p, loading: true }))
+    api
+      .concentration(companyIds)
+      .then((out) => vivo && setConc({ out, degraded: null, saturado: null, loading: false }))
+      .catch((err) =>
+        vivo &&
+          setConc({
+            out: null,
+            saturado: err.saturado ?? null,
+            degraded: err.saturado ? null : err.degraded ?? { status: err.message },
+            loading: false,
+          })
+      )
+    return () => {
+      vivo = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [group])
 
-  const idx = health?.checks?.search_indexes ?? {}
-  const searchReady = Object.values(idx)[0] === 'READY'
-  const vectorReady = Object.values(idx)[1] === 'READY'
-  const stats = net?.stats
+  const idx = health?.checks?.search_index ?? {}
+  const searchReady = Object.values(idx).slice(0, 2).every((v) => v === 'READY')
+  const vectorReady = Object.values(idx)[2] === 'READY'
 
   return (
     <div className="app" data-pov-shell>
-      <a className="pov-skip-link" href="#main-content">Skip to content</a>
+      <a className="pov-skip-link" href="#main-content">Pular para o conteúdo</a>
 
       <header className="topbar">
-        <span className="brand">Fraud ring graph</span>
+        <span className="brand">Grupo econômico &amp; risco de crédito</span>
         <span className="thesis">
-          One transaction on its own looks legitimate. <em>The network around it does not.</em>
+          A empresa parece pequena sozinha. <em>O grupo econômico dela não.</em>
         </span>
         <span className="spacer" />
-        <span className="hint">$graphLookup · Atlas Search · Vector Search · Change Streams</span>
+        <span className="hint">$graphLookup · Atlas Search · ACID · Change Streams</span>
         <HealthBadge health={health} />
       </header>
 
       <main className="body" id="main-content">
-        <aside className="rail" aria-label="Controls">
+        <aside className="rail" aria-label="Controles">
           <section className="block">
-            <h2>Entry point</h2>
-            <select value={subject} onChange={(e) => setSubject(e.target.value)} aria-label="Person under investigation">
-              <optgroup label="Accounts under suspicion">
-                {(entry?.suspects ?? []).map((s) => (
-                  <option key={s.person_id} value={s.person_id}>
-                    {s.person_name} · {s.ring_id}
+            <h2>Solicitante de crédito</h2>
+            <select value={cnpj} onChange={(e) => setCnpj(e.target.value)} aria-label="Empresa em análise">
+              <optgroup label="Pedidos de crédito">
+                {(entry?.applicants ?? []).map((a) => (
+                  <option key={a.cnpj} value={a.cnpj}>
+                    {a.razao_social}
                   </option>
                 ))}
               </optgroup>
-              <optgroup label="Clean population (control)">
-                {(entry?.clean ?? []).map((c) => (
-                  <option key={c._id} value={c._id}>{c.name}</option>
+              <optgroup label="Sem grupo econômico (controle)">
+                {(entry?.control ?? []).map((c) => (
+                  <option key={c.cnpj} value={c.cnpj}>{c.razao_social}</option>
                 ))}
               </optgroup>
             </select>
+            {subject && (
+              <p className="muted small">
+                CNPJ <code>{subject.cnpj}</code> · sozinha: rating {subject.rating ?? '—'} ·
+                limite {money(subject.limite, exposure?.currency)} · vencido{' '}
+                <b className={subject.vencido > 0 ? 'bad' : ''}>{money(subject.vencido, exposure?.currency)}</b>
+              </p>
+            )}
           </section>
 
           <section className="block">
-            <h2>Depth</h2>
-            <div className="depth-row" role="group" aria-label="Traversal depth">
+            <h2>Níveis societários</h2>
+            <div className="depth-row" role="group" aria-label="Profundidade do traversal">
               {DEPTHS.map((d) => (
                 <button key={d} className="depth-btn" aria-pressed={depth === d} onClick={() => setDepth(d)}>
                   {d}
                 </button>
               ))}
             </div>
-          </section>
-
-          <section className="block">
-            <h2>Edges</h2>
-            {EDGE_TYPES.map(([key, label, color]) => (
-              <label className="check" key={key}>
-                <input
-                  type="checkbox"
-                  checked={types.includes(key)}
-                  onChange={(e) =>
-                    setTypes((prev) => (e.target.checked ? [...prev, key] : prev.filter((x) => x !== key)))
-                  }
-                />
-                <span className="dot" style={{ background: color }} />
-                {label}
-              </label>
-            ))}
-            <label className="check">
-              <input type="checkbox" checked={prune} onChange={(e) => setPrune(e.target.checked)} />
-              <span className="dot" style={{ background: 'transparent', border: '1px solid var(--text-muted)' }} />
-              Prune hubs
-            </label>
+            <p className="muted small">
+              A maioria das consultas reais resolve entre 2 e 4. Mais fundo é suportado e mostrado,
+              não é o caso típico.
+            </p>
           </section>
 
           <section className="block block-action">
-            <h2>Analyst action</h2>
-            {/* Com um caso aberto o backend recusa abrir outro sobre os mesmos
-                nós, então o botão só ocuparia espaço no trilho fazendo nada. Some
-                enquanto o caso existe e volta quando ele é encerrado. */}
+            <h2>Decisão de crédito</h2>
             {!caseInfo && (
-              <button className="btn btn-primary btn-block" onClick={doFlag} disabled={busy || !ringNodes.length}>
-                Flag {ringNodes.length || 0} nodes for investigation
+              <button
+                className="btn btn-primary btn-block"
+                onClick={doReview}
+                disabled={busy || !companyIds.length}
+              >
+                Abrir revisão sobre {companyIds.length || 0} empresas
               </button>
             )}
-            {!caseInfo && ringNodes.length > 0 && depth < 3 && (
-              <p className="muted small">
-                You are at hop {depth}. The ring usually closes at 3 — flagging now blocks only
-                the {ringNodes.length} nodes in this expansion, not the whole ring.
-              </p>
-            )}
 
-            {caseInfo && (
-              <CaseCard info={caseInfo} detail={caseDetail} coaf={coaf} onCoaf={doCoaf} exposure={exposure} />
-            )}
+            {caseInfo && <CaseCard info={caseInfo} detail={caseDetail} exposure={exposure} />}
 
-            <button className="btn btn-ghost btn-block" disabled={busy || !net?.nodes?.length} onClick={doSimulate}>
-              Inject transaction into the network
+            <button
+              className="btn btn-ghost btn-block"
+              disabled={busy || !companyIds.length}
+              onClick={doOwnershipChange}
+            >
+              Simular entrada de empresa no grupo
             </button>
+            {/* O botão não se explicava sozinho. Ele existe para responder uma
+                pergunta específica: o grupo muda **depois** que o crédito foi
+                aprovado — e o banco descobre isso quando? */}
+            <p className="muted small">
+              Escreve uma participação nova em <code>ownership</code>. O change stream detecta e a
+              tela recebe o evento em segundos, sem polling — com o grupo sob revisão vira alerta,
+              sem revisão vira só uma verificação registrada. O grupo econômico muda depois da
+              aprovação, e é essa janela que o processo em lote não cobre.
+            </p>
             {lastSim && (
               <p className={`notice ${lastSim.expect_alert ? 'notice-bad' : 'notice-ok'}`}>
                 {lastSim.expect_alert
-                  ? 'Transaction injected into a blocked account — the alert should show up in the Alerts tab.'
-                  : 'Transaction injected while the network is FREE. No alert is the correct outcome: the listener read the state and had nothing to report.'}
+                  ? `${lastSim.acquirer.name} adquiriu ${lastSim.acquired.name} — o alerta deve aparecer em Alertas.`
+                  : 'Alteração registrada num grupo sem revisão aberta. Não alertar é o resultado correto: o listener leu o estado e não tinha o que reportar.'}
               </p>
             )}
 
             <div className="btn-row">
               <button className="btn btn-ghost" disabled={busy || !caseInfo} onClick={doClose}>
-                Close case
+                Encerrar revisão
               </button>
               <button className="btn btn-ghost" disabled={busy} onClick={doReset}>
-                Reset demo
+                Reiniciar demo
               </button>
             </div>
-            <p className="muted small">
-              Close the case, inject again, and no alert fires. That is the A/B.
-            </p>
           </section>
         </aside>
 
         <section className="stage">
-          <div className="metrics" role="group" aria-label="Expansion metrics">
-            <Metric k="Nodes" v={fmt(stats?.nodes)} />
-            <Metric k="Edges" v={fmt(stats?.edges_unique)} />
-            <Metric k="In ring" v={fmt(stats?.ring_nodes)} tone={stats?.ring_nodes ? 'bad' : undefined} />
-            {stats?.flagged_nodes > 0 && (
-              <Metric k="Blocked" v={fmt(stats.flagged_nodes)} tone="warn" />
-            )}
-            {/* Medido, não projetado: o volume que passou por estas contas. É o
-                que transforma "30 nós" em "por que isto importa". */}
-            {exposure?.volume > 0 && (
-              <Metric k="At risk" v={`${exposure.currency} ${compact(exposure.volume)}`} tone="bad" />
-            )}
-            <Metric k="Time" v={stats ? `${stats.elapsed_ms} ms` : '—'} tone={metricTone(stats?.elapsed_ms)} />
-            <Metric k="Hop" v={net?.depth ?? '—'} />
+          <div className="metrics" role="group" aria-label="Métricas do grupo">
+            <Metric k="Empresas" v={fmt(stats?.companies)} />
+            <Metric k="Sócios" v={fmt(stats?.partners)} />
+            <Metric k="Holdings" v={fmt((group?.nodes ?? []).filter((n) => n.is_holding).length)} />
+            <Metric
+              k="Limite do grupo"
+              v={exposure ? `${exposure.currency} ${compact(exposure.limite)}` : '—'}
+            />
+            <Metric
+              k="Vencido"
+              v={exposure ? `${exposure.currency} ${compact(exposure.vencido)}` : '—'}
+              tone={exposure?.vencido > 0 ? 'bad' : undefined}
+            />
+            <Metric k="Tempo" v={stats ? `${stats.elapsed_ms} ms` : '—'} tone={metricTone(stats?.elapsed_ms)} />
+            <Metric k="Níveis" v={group?.depth ?? '—'} />
             <span className="spacer" />
             <span className="legend">
-              <span><i className="dot" style={{ background: '#00ed64' }} /> entry</span>
-              <span><i className="dot" style={{ background: '#ff6960' }} /> ring</span>
-              <span><i className="dot dot-plain" /> clean</span>
-              <span><i className="dot dot-flagged" /> blocked</span>
+              <span><i className="dot" style={{ background: '#00ed64' }} /> solicitante</span>
+              <span><i className="dot" style={{ background: 'rgba(4,152,236,.6)' }} /> holding</span>
+              <span><i className="dot" style={{ background: '#ff6960' }} /> vencido</span>
+              <span><i className="dot" style={{ background: 'rgba(255,192,16,.6)' }} /> sócio PF</span>
+              <span><i className="dot dot-flagged" /> em revisão</span>
             </span>
           </div>
 
           <div className="canvas-wrap">
-            {net?.nodes?.length ? (
+            {group?.nodes?.length ? (
               <GraphCanvas
-                data={net}
+                data={group}
                 pinned={picked}
                 onSelect={setPicked}
                 onHover={setHovered}
+                foraDoEscopo={tab === 'visibility' ? foraDoEscopo : null}
+                destaque={destaque}
               />
             ) : (
               <div className="canvas empty">
-                {busy ? 'expanding…' : error ? error : 'No links from this entry point.'}
+                {busy ? 'resolvendo a cadeia…' : error ? error : 'Esta empresa não tem cadeia societária.'}
               </div>
             )}
             {stats?.truncated && (
               <p className="canvas-note">
-                truncated at {fmt(stats.max_nodes)} nodes out of {fmt(stats.edges_before_truncation)} edges — high
-                fan-out, behaviour described in <code>LIMITATIONS.md §4</code>
+                truncado em {fmt(stats.max_nodes)} nós — ver <code>LIMITATIONS.md</code>
               </p>
             )}
           </div>
         </section>
 
-        <aside className="inspector" aria-label="Detail and evidence">
+        <aside className="inspector" aria-label="Detalhe e evidência">
           <div className="tabs" role="tablist">
             {TABS.map(([key, label]) => (
-              <button
-                key={key}
-                role="tab"
-                className="tab"
-                aria-selected={tab === key}
-                onClick={() => setTab(key)}
-              >
+              <button key={key} role="tab" className="tab" aria-selected={tab === key} onClick={() => setTab(key)}>
                 {label}
-                {key === 'alerts' && alerts.length > 0 && (
-                  <span className="tab-count">{alerts.length}</span>
-                )}
+                {key === 'alerts' && alerts.length > 0 && <span className="tab-count">{alerts.length}</span>}
               </button>
             ))}
           </div>
 
           <div className="tab-body">
-            {tab === 'node' && (
+            {tab === 'company' && (
               <NodePanel
                 node={detail}
                 neighbours={neighbours}
                 byId={byId}
-                hovering={Boolean(hovered)}
                 pinned={pinned}
-                depth={depth}
+                currency={exposure?.currency}
                 onPick={setPicked}
                 onUnpin={() => setPicked(null)}
               />
@@ -511,120 +507,268 @@ export default function App() {
 
             {tab === 'search' && (
               <>
-                <StatusLine ready={searchReady} label="Atlas Search" status={Object.values(idx)[0]} />
-                {entry?.entity_resolution_case && (
-                  <p className="muted small">
-                    The dataset contains <code>{entry.entity_resolution_case.typo_name}</code>, spelled almost
-                    exactly like <code>{entry.entity_resolution_case.real_name}</code>. No edge connects the two —
-                    only <code>fuzzy</code> reaches it.
-                  </p>
-                )}
-                <ScopePicker
-                  value={search.scope}
-                  disabled={!nodeIds.length}
-                  onChange={(sc) => {
-                    setSearch((p) => ({ ...p, scope: sc }))
-                    if (search.q.trim()) doSearch(null, sc)
-                  }}
-                  labels={[
-                    ['base', `Whole database`],
-                    ['rede', `This network only (${nodeIds.length})`],
-                  ]}
+                <StatusLine
+                  ready={searchReady}
+                  label="Atlas Search"
+                  status={Object.values(health?.checks?.search_index ?? {})[0]}
                 />
+                <p className="muted small">
+                  Razão social se escreve de muitos jeitos, e igualdade exata trata as variações
+                  como empresas diferentes — é assim que um grupo passa despercebido. Sócios pessoa
+                  física também entram na busca: descobrir um grupo costuma começar pelo nome de uma
+                  pessoa, não por um CNPJ. Cada resultado diz se já está no grupo que está na tela.
+                </p>
                 <form onSubmit={doSearch} className="inline-form">
                   <input
                     type="text"
                     value={search.q}
                     onChange={(e) => setSearch((p) => ({ ...p, q: e.target.value }))}
-                    aria-label="Name to resolve"
+                    aria-label="Razão social"
+                    placeholder="ex.: parte do nome do solicitante"
                   />
-                  <button className="btn btn-ghost" disabled={!searchReady || !search.q.trim()}>Search</button>
+                  <button className="btn btn-ghost" disabled={!searchReady || !search.q.trim()}>Buscar</button>
                 </form>
+                {/* Escopo é o padrão. Abrir para a base inteira é o gesto de
+                    entity resolution — procurar uma empresa que **ainda não** está
+                    no grafo e talvez pertença ao grupo. Deixar isso ligado por
+                    padrão enchia a lista de homônimos sem relação com a tela. */}
+                <label className="check-line">
+                  <input
+                    type="checkbox"
+                    checked={search.todaBase}
+                    onChange={(e) => setSearch((p) => ({ ...p, todaBase: e.target.checked }))}
+                  />
+                  procurar em toda a base (fora do grupo em tela)
+                </label>
                 {search.degraded && <Degraded d={search.degraded} feature="Atlas Search" />}
                 {search.out && (
                   <div className="rows">
-                    {search.out.scope === 'base' && (
+                    <p className="muted small">{search.out.score_note}</p>
+                    {search.out.results.length === 0 && (
                       <p className="muted small">
-                        {search.out.na_rede > 0
-                          ? `${search.out.na_rede} in the network on screen, listed first; the rest is the whole database.`
-                          : 'No result is in the network on screen — all of them come from the database.'}
+                        Nada com esse nome no grupo em tela.{' '}
+                        {!search.todaBase && 'Marque "procurar em toda a base" para olhar fora dele.'}
                       </p>
                     )}
                     {search.out.results.map((r) => (
-                      <div className={`row ${r.na_rede ? 'hit' : ''}`} key={r._id}>
+                      <button
+                        type="button"
+                        className={`row as-button ${r.in_group ? 'hit' : ''} ${
+                          destaque?.has(r._id) ? 'apontado' : ''
+                        }`}
+                        key={r._id}
+                        // Fora do grupo não existe no grafo: não há o que apontar,
+                        // e piscar o grafo inteiro seria pior do que não reagir.
+                        onClick={() => r.in_group && aponta([r._id])}
+                      >
                         <span className="grow">
-                          {r.name}
+                          {r.label}
                           <em>
-                            {/* A relação com o grafo é a informação que faltava:
-                                sem ela, "Diego" devolvia dez Diegos e o analista
-                                não sabia qual deles estava sob investigação. */}
-                            <span className={r.na_rede ? 'tag tag-in' : 'tag'}>
-                              {r.na_rede ? 'in network' : 'outside'}
+                            <span className={r.in_group ? 'tag tag-in' : 'tag'}>
+                              {r.in_group ? 'no grupo' : 'fora'}
                             </span>
-                            {r.ring_id ? ` ring ${r.ring_id}` : ' no ring'}
-                            {r.city ? ` · ${r.city}` : ''}
+                            <span className="tag">{r.kind === 'person' ? 'sócio' : 'empresa'}</span>
+                            {r.kind === 'company' ? `${r.cnpj} · ${r.uf} · ${r.situacao}` : r.occupation}
                           </em>
+                          {r.kind === 'company' ? (
+                            <em>
+                              {r.rating ? `rating ${r.rating} · ` : 'sem crédito no banco · '}
+                              limite {money(r.limite, exposure?.currency)}
+                              {r.vencido > 0 ? ` · vencido ${money(r.vencido, exposure?.currency)}` : ''}
+                            </em>
+                          ) : (
+                            // Quantas empresas o sócio controla é o número que diz
+                            // se vale olhar: sete em grupos diferentes é uma
+                            // pergunta, uma é cadastro.
+                            <em>
+                              participa de {fmt(r.companies)}{' '}
+                              {r.companies === 1 ? 'empresa' : 'empresas'} · {r.age_band} ·{' '}
+                              {r.income_band}
+                            </em>
+                          )}
                         </span>
-                        <span className="score">{r.score.toFixed(2)}</span>
-                      </div>
+                        <span className="score">{r.score?.toFixed(2)}</span>
+                      </button>
                     ))}
-                    <p className="muted small">{search.out.elapsed_ms} ms · {search.out.index}</p>
+                    <p className="muted small">
+                      {search.out.companies_found} empresas · {search.out.people_found} sócios ·{' '}
+                      {search.out.elapsed_ms} ms
+                    </p>
                   </div>
                 )}
               </>
             )}
 
-            {tab === 'vector' && (
+            {tab === 'semantic' && (
               <>
-                <StatusLine ready={vectorReady} label="Vector Search" status={Object.values(idx)[1]} />
-                {/* A pergunta é o que dá sentido ao painel. Solto na base, ele
-                    só mostra que o motor entende sinônimo; escopado na rede, ele
-                    responde "que desculpa essas contas usam para mover dinheiro?" */}
-                <p className="muted small">
-                  {vector.scope === 'rede'
-                    ? 'What reasons do the accounts in this network give? The same excuse rewritten several ways is not a coincidence — and keyword search does not group it.'
-                    : 'Meaning-based search over the whole database: phrases that say the same thing without sharing a single word.'}
-                </p>
-                <ScopePicker
-                  value={vector.scope}
-                  disabled={!ringIds.length}
-                  onChange={(sc) => {
-                    setVector((p) => ({ ...p, text: SUGESTAO_VETOR[sc], scope: sc }))
-                    doVector(null, sc)
-                  }}
-                  labels={[
-                    ['rede', ringIds.length ? `This network only (${ringIds.join(', ')})` : 'This network only'],
-                    ['base', 'Whole database'],
-                  ]}
+                <StatusLine
+                  ready={vectorReady}
+                  label="Vector Search"
+                  status={Object.values(idx)[2]}
                 />
-                <form onSubmit={doVector} className="inline-form">
-                  <input
-                    type="text"
-                    value={vector.text}
-                    onChange={(e) => setVector((p) => ({ ...p, text: e.target.value }))}
-                    aria-label="Reason text"
-                  />
-                  <button className="btn btn-ghost" disabled={!vectorReady || !vector.text.trim()}>Search</button>
-                </form>
-                {vector.degraded && <Degraded d={vector.degraded} feature="Vector Search" />}
-                {vector.out && (
+                <p className="muted small">
+                  Vários CNAEs diferentes parecem diversificação, e diversificação é o que dilui
+                  risco de crédito. Mas &quot;construção de edifícios&quot;, &quot;obras de
+                  alvenaria&quot; e &quot;serviços de engenharia de obras&quot; são três códigos e um
+                  negócio só. Comparar código não pega isso. Comparar palavra também não — as frases
+                  não dividem termo nenhum. Comparar significado pega.
+                </p>
+                {conc.saturado && <Saturado d={conc.saturado} />}
+                {conc.degraded && <Degraded d={conc.degraded} feature="Vector Search" />}
+                {conc.loading && <p className="muted small">lendo o grupo…</p>}
+                {conc.out?.empty && <p className="muted small">{conc.out.reason}</p>}
+                {conc.out && !conc.out.empty && (
                   <div className="rows">
-                    <p className={vector.out.formas_distintas > 2 ? 'notice notice-warn' : 'muted small'}>
-                      {vector.out.scope === 'rede'
-                        ? `${vector.out.formas_distintas} different ways of saying the same thing inside this network.`
-                        : `${vector.out.formas_distintas} different ways across the whole database.`}
+                    <p
+                      className={
+                        conc.out.dominant_block_share > 0.5 ? 'notice notice-bad' : 'notice notice-ok'
+                      }
+                    >
+                      {conc.out.cnae_count} códigos CNAE,{' '}
+                      <b>
+                        {conc.out.distinct_businesses}{' '}
+                        {conc.out.distinct_businesses === 1 ? 'negócio distinto' : 'negócios distintos'}
+                      </b>{' '}
+                      — {Math.round(conc.out.dominant_block_share * 100)}% do limite do grupo está em
+                      um deles.
                     </p>
-                    {vector.out.results.map((r) => (
-                      <div className={`row ${r.ring_id ? 'hit' : ''}`} key={r.reason_text}>
-                        <span className="grow">
-                          {r.reason_text}
-                          <em>{fmt(r.ocorrencias_no_bloco)} occurrences · avg R$ {fmt(Math.round(r.amount))}</em>
-                        </span>
-                        <span className="score">{r.score.toFixed(3)}</span>
-                      </div>
-                    ))}
+                    {conc.out.activities.map((a) => {
+                      const equivalente = conc.out.equivalent_to_dominant.find(
+                        (e) => e.activity === a.activity
+                      )
+                      // As empresas daquela atividade, no grafo em tela.
+                      const dela = (group?.nodes ?? [])
+                        .filter((n) => n.kind === 'company' && n.activity === a.activity)
+                        .map((n) => n.id)
+                      const apontado = dela.length > 0 && dela.every((id) => destaque?.has(id))
+                      return (
+                        <button
+                          type="button"
+                          className={`row as-button ${equivalente ? 'hit' : ''} ${
+                            apontado ? 'apontado' : ''
+                          }`}
+                          key={a.activity}
+                          onClick={() => aponta(dela)}
+                        >
+                          <span className="grow">
+                            {a.activity}
+                            <em>
+                              {equivalente && (
+                                <span className="tag tag-in">mesmo negócio</span>
+                              )}
+                              {a.companies} {a.companies === 1 ? 'empresa' : 'empresas'} ·{' '}
+                              {Math.round(a.share * 100)}% do limite
+                            </em>
+                            <em className={a.vencido > 0 ? 'bad' : ''}>
+                              limite {money(a.limite, conc.out.currency)}
+                              {a.vencido > 0 ? ` · vencido ${money(a.vencido, conc.out.currency)}` : ''}
+                            </em>
+                          </span>
+                          {equivalente?.score != null && (
+                            <span className="score">{equivalente.score.toFixed(2)}</span>
+                          )}
+                        </button>
+                      )
+                    })}
                     <p className="muted small">
-                      {vector.out.elapsed_ms} ms · {vector.out.model} · {vector.out.dimensions}d
+                      Similaridade acima de {conc.out.threshold} conta como o mesmo negócio.
+                      Calibrado neste dado, não é um limiar universal — o score de cada par aparece
+                      para o número não virar caixa-preta. {conc.out.elapsed_ms} ms · {conc.out.model}
+                    </p>
+                  </div>
+                )}
+              </>
+            )}
+
+            {tab === 'visibility' && (
+              <>
+                <p className="muted small">
+                  Quem enxerga quais contas é um traversal, não uma lista guardada. A árvore em{' '}
+                  <code>advisors.reports_to</code> é a fonte da verdade, e o escopo é derivado dela na
+                  hora da consulta — um gerente alcança todos os assessores abaixo dele, um assessor
+                  alcança só a própria carteira. Uma lista de visibilidade pré-calculada desatualiza a
+                  cada troca de carteira; isto não tem como.
+                </p>
+                <div className="rows">
+                  {vis.roster.map((u) => (
+                    <button
+                      key={u._id}
+                      className={`row as-button ${vis.user === u._id ? 'hit' : ''}`}
+                      aria-pressed={vis.user === u._id}
+                      onClick={() => {
+                        setVis((v) => ({ ...v, user: u._id }))
+                        // Selecionar já esmaece o que está fora do escopo; apontar
+                        // mostra **quais empresas deste grupo** são desta pessoa.
+                        // Um assessor com 8 de 25 é uma frase; ver as 8 acesas é
+                        // o argumento.
+                        aponta(
+                          (group?.nodes ?? [])
+                            .filter((n) => n.kind === 'company' && n.advisor_id === u._id)
+                            .map((n) => n.id)
+                        )
+                      }}
+                    >
+                      <span className="grow">
+                        {u.nome}
+                        <em>
+                          {u.papel} · {u.matricula} · {u.regiao}
+                        </em>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                {vis.saturado && <Saturado d={vis.saturado} />}
+                {vis.out && cobertura && (
+                  <p className={`notice ${cobertura.dentro === cobertura.total ? 'notice-ok' : 'notice-warn'}`}>
+                    Neste grupo econômico, <b>{cobertura.dentro} de {cobertura.total}</b> empresas
+                    estão no escopo deste usuário
+                    {cobertura.assessores > 1 && (
+                      <> — o grupo é atendido por {cobertura.assessores} assessores</>
+                    )}
+                    . As fora do escopo aparecem esmaecidas no grafo.
+                  </p>
+                )}
+                {vis.check && (
+                  <p className={`notice ${vis.check.allowed ? 'notice-ok' : 'notice-bad'}`}>
+                    {vis.check.allowed ? 'Visível' : 'Não visível'}: {vis.check.razao_social} —{' '}
+                    {vis.check.reason}. A conta é do assessor {vis.check.owner?.nome} (
+                    {vis.check.owner?.papel}).
+                  </p>
+                )}
+                {vis.out && (
+                  <div className="rows">
+                    <p className="notice notice-ok">
+                      <b>{vis.out.scope.advisors}</b>{' '}
+                      {vis.out.scope.advisors === 1 ? 'pessoa' : 'pessoas'} no escopo ·{' '}
+                      {fmt(vis.out.portfolio.companies_with_credit)} contas com crédito · limite{' '}
+                      {money(vis.out.portfolio.limite, vis.out.portfolio.currency)}
+                      {vis.out.portfolio.vencido > 0 && (
+                        <> · vencido {money(vis.out.portfolio.vencido, vis.out.portfolio.currency)}</>
+                      )}
+                    </p>
+                    {vis.out.portfolio.top.slice(0, 8).map((c) => {
+                      const noGrafo = (group?.nodes ?? []).some((n) => n.id === c.id)
+                      return (
+                      <button
+                        type="button"
+                        className={`row as-button ${destaque?.has(c.id) ? 'apontado' : ''}`}
+                        key={c.id}
+                        onClick={() => noGrafo && aponta([c.id])}
+                        title={noGrafo ? 'Apontar no grafo' : 'Esta conta não está no grupo em tela'}
+                      >
+                        <span className="grow">
+                          {c.razao_social}
+                          <em>
+                            {c.cnpj} · {c.uf} · {c.rating ?? 'sem rating'}
+                          </em>
+                        </span>
+                        <span className="score">{money(c.utilizado, vis.out.portfolio.currency)}</span>
+                      </button>
+                      )
+                    })}
+                    <p className="muted small">
+                      Uma agregação: $graphLookup descendo a árvore e a carteira somada no servidor.{' '}
+                      {vis.out.elapsed_ms} ms
                     </p>
                   </div>
                 )}
@@ -636,40 +780,47 @@ export default function App() {
                 <StatusLine
                   ready={health?.checks?.change_stream?.running}
                   label="Change Stream"
-                  status={health?.checks?.change_stream?.running ? 'READY' : 'parado'}
+                  status={health?.checks?.change_stream?.running ? 'READY' : 'stopped'}
                 />
                 {alerts.length === 0 ? (
                   <p className="muted small">
-                    Nothing yet. Inject a transaction: with the network flagged you get an alert,
-                    without it you get the check — and both show up here.
+                    Nada ainda. Registre uma alteração societária: com o grupo sob revisão sai
+                    alerta, sem revisão sai a verificação — e as duas aparecem aqui.
                   </p>
                 ) : (
                   alerts.map((a) =>
                     a.type === 'checked' ? (
-                      /* O silêncio precisa ter forma. Sem este evento, injetar numa
-                         rede livre não mostrava nada e parecia demo travada — quando
-                         é justamente a metade que prova que o alerta lê o estado. */
-                      <div className="alert alert-check" key={a.transaction_id}>
-                        <strong>R$ {fmt(Math.round(a.amount))}</strong> checked — no account under
-                        investigation, no alert
+                      <div className="alert alert-check" key={a.edge_id}>
+                        <strong>Alteração verificada</strong> — nenhuma empresa sob revisão, sem alerta
                         <em>
-                          <code>{a.transaction_id}</code> · {a.checked_accounts?.length ?? 0} accounts
-                          checked in {a.lookup_ms} ms · {new Date(a.at).toLocaleTimeString('en-US')}
+                          {a.checked_companies} empresas verificadas em {a.lookup_ms} ms ·{' '}
+                          {new Date(a.at).toLocaleTimeString('pt-BR')}
                         </em>
-                      </div>
-                    ) : a.type === 'edge_materialized' ? (
-                      <div className="alert alert-check" key={a.transaction_id ?? a.at}>
-                        <strong>edge created live</strong> by the change stream
-                        <em>{new Date(a.at).toLocaleTimeString('en-US')}</em>
                       </div>
                     ) : (
-                      <div className="alert" key={a.transaction_id}>
-                        <strong>R$ {fmt(Math.round(a.amount))}</strong> touched ring {a.ring_id ?? a.case_id}
+                      <button
+                        type="button"
+                        className="alert as-button"
+                        key={a.edge_id}
+                        onClick={() =>
+                          aponta(
+                            (group?.nodes ?? [])
+                              .filter(
+                                (n) => n.label === a.acquirer || n.label === a.acquired
+                              )
+                              .map((n) => n.id)
+                          )
+                        }
+                      >
+                        <strong>{a.acquirer}</strong> adquiriu {a.percentage}% de {a.acquired}
                         <em>
-                          <code>{a.transaction_id}</code> · checked in {a.lookup_ms} ms ·{' '}
-                          {new Date(a.at).toLocaleTimeString('en-US')}
+                          entrou no grupo: limite {money(a.added_limite, exposure?.currency)}
+                          {a.added_vencido > 0 ? ` · vencido ${money(a.added_vencido, exposure?.currency)}` : ''}
                         </em>
-                      </div>
+                        <em>
+                          verificado em {a.lookup_ms} ms · {new Date(a.at).toLocaleTimeString('pt-BR')}
+                        </em>
+                      </button>
                     )
                   )
                 )}
@@ -678,8 +829,8 @@ export default function App() {
           </div>
 
           <details className="query-drawer">
-            <summary>Query executed</summary>
-            <pre>{JSON.stringify(pipelinePreview(subject, net), null, 2)}</pre>
+            <summary>Consulta executada</summary>
+            <pre>{JSON.stringify(pipelinePreview(cnpj, group), null, 2)}</pre>
           </details>
         </aside>
       </main>
@@ -688,234 +839,167 @@ export default function App() {
 }
 
 /**
- * O caso, na coluna onde a ação foi disparada — de propósito sem aba nova.
+ * A decisão de crédito, na coluna onde a ação foi disparada.
  *
- * Antes, tudo o que a transação ACID fazia aparecia como uma linha com o
- * `case_id`. O trabalho real (contas saindo de `active` para
- * `under_investigation`, junto com o registro de auditoria, num commit só) ficava
- * invisível, e a parte mais forte da demo passava despercebida.
- *
- * O relatório de compliance fica num `<details>` fechado: ele é a resposta para
- * "e o que o banco faz com isso?", que nem toda plateia pergunta.
+ * Manchete sempre visível; o resto atrás de blocos recolhidos. Com tudo aberto o
+ * trilho passa da altura do viewport e o apresentador precisa rolar para achar
+ * "Close review" — que é justamente o que não pode acontecer numa demo.
  */
-function CaseCard({ info, detail, coaf, onCoaf, exposure }) {
-  const contas = detail?.accounts ?? []
-  const bloqueadas = contas.filter((c) => c.status === 'under_investigation').length
+function CaseCard({ info, detail, exposure }) {
+  const empresas = detail?.companies ?? []
   return (
     <div className="case-card">
       <p className="case-line">
-        <span className="badge badge-bad">case open</span> <code>{info.case_id}</code>
+        <span className="badge badge-bad">revisão aberta</span> <code>{info.case_id}</code>
       </p>
       <dl className="case-grid">
-        <div><dt>Accounts blocked</dt><dd>{fmt(bloqueadas || info.accounts_flagged)}</dd></div>
-        <div><dt>People flagged</dt><dd>{fmt(info.people_flagged)}</dd></div>
+        <div><dt>Empresas bloqueadas</dt><dd>{fmt(empresas.length || info.companies_blocked)}</dd></div>
+        <div><dt>Exposições marcadas</dt><dd>{fmt(info.exposures_flagged)}</dd></div>
         <div><dt>Commit</dt><dd>{info.elapsed_ms} ms</dd></div>
-        <div><dt>Guarantee</dt><dd>{info.read_concern} / {info.write_concern}</dd></div>
+        <div><dt>Garantia</dt><dd>{info.read_concern} / {info.write_concern}</dd></div>
       </dl>
-      {/* Três blocos recolhidos, um por pergunta que a plateia pode fazer.
-          Abertos de uma vez o trilho passa de 1.200 px e o apresentador precisa
-          rolar para achar "Close case" — que é justamente o que não pode. */}
-      {contas.length > 0 && (
+
+      {empresas.length > 0 && (
         <details className="case-compliance">
-          <summary>What the transaction changed</summary>
+          <summary>O que a transação mudou</summary>
           <div className="case-diff">
-            {contas.slice(0, 4).map((c) => (
-              // Uma pessoa pode ter mais de uma conta, e as linhas são por CONTA.
-              // Sem o tipo, o mesmo nome aparecia duas vezes e parecia duplicata.
+            {empresas.slice(0, 4).map((c) => (
               <p key={c._id} className="case-diff-row">
                 <span className="grow">
-                  {c.person_name ?? c._id.slice(0, 14)}
-                  {c.account_type && <em>{c.account_type}</em>}
+                  {c.razao_social}
+                  <em>{c.cnpj}{c.is_holding ? ' · holding' : ''}</em>
                 </span>
-                <s>active</s> <b>blocked</b>
+                <s>ativa</s> <b>bloqueada</b>
               </p>
             ))}
-            {contas.length > 4 && (
-              <p className="muted small">and {fmt(contas.length - 4)} more accounts</p>
+            {empresas.length > 4 && (
+              <p className="muted small">e mais {fmt(empresas.length - 4)} empresas</p>
             )}
             <p className="muted small">
-              All three writes — <code>accounts.status</code>, <code>people.risk_flags</code> and
-              the audit document — committed together. Half the network blocked with no coherent
-              audit record is worse than not having acted at all.
+              As três escritas — <code>companies.credit_status</code>,{' '}
+              <code>credit_exposure.review_flag</code> e o registro da decisão — commitam juntas.
+              Metade do grupo bloqueada com a outra metade liberada é pior do que não decidir: a mesa
+              aprova pela porta que ficou aberta, e a auditoria não consegue reconstruir o que foi
+              decidido.
             </p>
           </div>
         </details>
       )}
 
-      {/* O caso em dinheiro. Fechado por padrão: nem toda plateia pergunta, e
-          uma tela cheia de número que ninguém pediu é ruído. */}
-      {exposure?.volume > 0 && (
+      {exposure && (
         <details className="case-compliance">
-          <summary>What this case is worth</summary>
+          <summary>Quanto vale esta decisão</summary>
           <div className="rows">
             <div className="row compliance">
               <span className="grow">
-                <strong>Measured — what moved through this network</strong>
-                <em>
-                  {exposure.currency} {fmt(Math.round(exposure.volume))} across{' '}
-                  {fmt(exposure.operations)} operations
+                <strong>Medido — a exposição do grupo</strong>
+                <em>limite {money(exposure.limite, exposure.currency)} em {fmt(exposure.companies_with_credit)} empresas</em>
+                <em>utilizado {money(exposure.utilizado, exposure.currency)}</em>
+                <em className={exposure.vencido > 0 ? 'bad' : ''}>
+                  vencido {money(exposure.vencido, exposure.currency)}
                 </em>
-                <em>
-                  {fmt(exposure.accounts)} accounts
-                  {exposure.window_days ? ` · ${fmt(exposure.window_days)} day window` : ''} · avg{' '}
-                  {exposure.currency} {fmt(Math.round(exposure.avg_ticket))}
-                </em>
-                <em>from `transactions`, not a projection</em>
-              </span>
-            </div>
-            <div className="row compliance">
-              <span className="grow">
-                <strong>Your number — what an investigation costs today</strong>
-                <em>
-                  {exposure.assumption.hours_per_case} h × {exposure.currency}{' '}
-                  {fmt(exposure.assumption.cost_per_hour)}/h = {exposure.currency}{' '}
-                  {fmt(exposure.assumption.cost_per_case)} per case
-                </em>
-                <em>
-                  one case per account today: {fmt(exposure.assumption.manual_cases)} ×{' '}
-                  {exposure.currency} {fmt(exposure.assumption.cost_per_case)} ={' '}
-                  <b>{exposure.currency} {fmt(exposure.assumption.manual_cost)}</b>
-                </em>
-                <em>
-                  one case for the whole ring here:{' '}
-                  <b>{exposure.currency} {fmt(exposure.assumption.graph_cost)}</b>
-                </em>
+                <em>de `credit_exposure`, não é projeção</em>
               </span>
             </div>
             <p className="muted small">
-              The volume is measured. The hours and the hourly cost are the bank&apos;s own
-              numbers — set them in <code>.env</code>. We deliberately do not estimate loss
-              avoided: turning exposure into loss needs a rate that varies by product and by
-              institution, and guessing it would undo everything else that was measured.
+              A exposição é medida. Quanto vale pegar isso antes de aprovar é número do próprio
+              banco — não estimamos perda evitada de propósito, pelo mesmo motivo que nenhum
+              benchmark aqui é estimado.
             </p>
           </div>
         </details>
       )}
-
-      <details className="case-compliance" onToggle={(e) => e.target.open && !coaf && onCoaf()}>
-        <summary>What the bank is now required to do</summary>
-        {!coaf ? (
-          <p className="muted small">loading…</p>
-        ) : (
-          <div className="rows">
-            <ComplianceRow
-              titulo="COAF — report within 24h"
-              norma={coaf.comunicacao.fundamento}
-              linhas={[
-                `deadline: ${new Date(coaf.comunicacao.prazo_limite).toLocaleString('en-US')}`,
-                `${fmt(coaf.comunicacao.operacoes_analisadas)} operations · R$ ${fmt(Math.round(coaf.comunicacao.volume_analisado))}`,
-                coaf.comunicacao.tipologia,
-              ]}
-            />
-            <ComplianceRow
-              titulo="MED — precautionary block"
-              norma={coaf.med.fundamento}
-              linhas={[
-                `review by ${new Date(coaf.med.prazo_analise).toLocaleString('en-US')}`,
-                coaf.med.observacao,
-              ]}
-            />
-            <ComplianceRow
-              titulo="LGPD — record of processing"
-              norma={coaf.lgpd.fundamento}
-              linhas={[coaf.lgpd.registro, coaf.lgpd.observacao]}
-            />
-            <p className="muted small">
-              None of this is wired to an external system — and that is the point. The document
-              comes entirely from the audit record that committed alongside the block.
-            </p>
-          </div>
-        )}
-      </details>
     </div>
   )
 }
 
-function ComplianceRow({ titulo, norma, linhas }) {
-  return (
-    <div className="row compliance">
-      <span className="grow">
-        <strong>{titulo}</strong>
-        <em>{norma}</em>
-        {linhas.filter(Boolean).map((l, i) => (
-          <em key={i}>{l}</em>
-        ))}
-      </span>
-    </div>
-  )
-}
-
-function NodePanel({ node, neighbours, byId, hovering, pinned, depth, onPick, onUnpin }) {
+function NodePanel({ node, neighbours, byId, pinned, currency, onPick, onUnpin }) {
   if (!node) {
     return (
       <p className="muted small">
-        Hover a node to isolate its neighbours, or click to pin the detail here.
-        The current expansion reaches {depth} hop{depth > 1 ? 's' : ''}.
+        Passe o mouse num nó para isolar os vínculos dele, ou clique para fixar o detalhe aqui.
+        Caixa é empresa, círculo é sócio pessoa física; a seta aponta de quem controla para quem é
+        controlado.
       </p>
     )
   }
   const vizinhos = [...(neighbours.get(node.id) ?? [])]
-  const abertura = node.first_account_opened_at ? new Date(node.first_account_opened_at) : null
-  const ultima = node.last_account_opened_at ? new Date(node.last_account_opened_at) : null
+  const empresa = node.kind === 'company'
   return (
     <div className="node-detail">
       <div className="node-head">
         <h3>{node.label}</h3>
-        {/* Sem esta marca, o painel muda de conteúdo com o mouse e o analista não
-            sabe de onde veio o que está lendo. Fixar precisa ser visível. */}
         {pinned && (
-          <button className="pin-chip" onClick={onUnpin} title="Unpin the node">
-            pinned ✕
-          </button>
+          <button className="pin-chip" onClick={onUnpin} title="Soltar o nó">fixado ✕</button>
         )}
       </div>
-      <span className={`badge ${node.ring_id ? 'badge-bad' : 'badge-ok'}`}>
-        {node.ring_id ? `ring ${node.ring_id}` : 'no known ring'}
-      </span>
-      {node.flagged && <span className="badge badge-warn">under investigation · {node.case_id}</span>}
-      <dl>
-        <div><dt>Hops from entry</dt><dd>{node.hops}</dd></div>
-        <div><dt>Degree in subgraph</dt><dd>{vizinhos.length}</dd></div>
-        <div><dt>Role</dt><dd>{node.is_root ? 'entry point' : 'reached by traversal'}</dd></div>
-        {node.city && <div><dt>City</dt><dd>{node.city}</dd></div>}
-        <div><dt>Accounts</dt><dd>{fmt(node.accounts)}{node.account_types?.length ? ` · ${node.account_types.join(', ')}` : ''}</dd></div>
-        {/* Data de abertura é evidência, não enfeite: contas de CPFs diferentes
-            abertas na mesma janela, operando do mesmo aparelho, é fazenda de
-            mulas — e o analista lê isso sem o apresentador narrar. */}
-        {abertura && (
-          <div>
-            <dt>Oldest account</dt>
-            <dd>{abertura.toLocaleDateString('en-US')}</dd>
-          </div>
-        )}
-        {ultima && ultima.getTime() !== abertura?.getTime() && (
-          <div>
-            <dt>Newest account</dt>
-            <dd>{ultima.toLocaleDateString('en-US')}</dd>
-          </div>
-        )}
-        <div>
-          <dt>Account status</dt>
-          <dd>{node.flagged ? 'blocked' : 'active'}</dd>
-        </div>
-        {node.risk_flags?.length > 0 && (
-          <div><dt>Risk flags</dt><dd>{node.risk_flags.join(', ')}</dd></div>
-        )}
-      </dl>
+      {empresa ? (
+        <>
+          {node.is_subject && <span className="badge badge-ok">solicitante</span>}
+          {node.is_holding && <span className="badge badge-warn">holding</span>}
+          {node.vencido > 0 && <span className="badge badge-bad">vencido</span>}
+          {node.credit_status === 'under_review' && (
+            <span className="badge badge-warn">em revisão · {node.case_id}</span>
+          )}
+          <dl>
+            <div><dt>CNPJ</dt><dd>{node.cnpj}</dd></div>
+            <div><dt>UF</dt><dd>{node.uf}</dd></div>
+            <div><dt>Situação</dt><dd>{node.situacao}</dd></div>
+            <div><dt>Porte</dt><dd>{node.porte}</dd></div>
+            <div><dt>Atividade</dt><dd className="wrap">{node.activity}</dd></div>
+            {/* "R$ 0" e "não tem crédito conosco" são coisas diferentes, e a
+                distinção é a que o analista precisa: uma empresa sem relação de
+                crédito não entra na exposição do grupo; uma com limite zerado
+                entra. Mostrar zero nos dois casos confunde as duas. */}
+            {/* Quem responde pela conta. É a pergunta que um gerente faz antes
+                de qualquer número, e é o campo que liga os dois cenários da POV:
+                a cadeia societária e a hierarquia comercial. */}
+            {node.advisor && (
+              <div>
+                <dt>Assessor</dt>
+                <dd>
+                  {node.advisor.nome} <em className="muted">· {node.advisor.matricula}</em>
+                </dd>
+              </div>
+            )}
+            {node.rating ? (
+              <>
+                <div><dt>Rating</dt><dd>{node.rating}</dd></div>
+                <div><dt>Limite</dt><dd>{money(node.limite, currency)}</dd></div>
+                <div><dt>Utilizado</dt><dd>{money(node.utilizado, currency)}</dd></div>
+                <div>
+                  <dt>Vencido</dt>
+                  <dd className={node.vencido > 0 ? 'bad' : ''}>{money(node.vencido, currency)}</dd>
+                </div>
+              </>
+            ) : (
+              <div><dt>Crédito</dt><dd>sem relação com este banco</dd></div>
+            )}
+          </dl>
+        </>
+      ) : (
+        <>
+          <span className="badge badge-warn">sócio pessoa física</span>
+          <dl>
+            <div><dt>Ocupação</dt><dd>{node.occupation ?? '—'}</dd></div>
+            <div><dt>Faixa etária</dt><dd>{node.age_band ?? '—'}</dd></div>
+            <div><dt>Faixa de renda</dt><dd>{node.income_band ?? '—'}</dd></div>
+          </dl>
+          <p className="muted small">
+            Uma pessoa com participação em empresas de grupos diferentes é como um grupo oculto
+            aparece — a cadeia societária chega nela, o cadastro da empresa não.
+          </p>
+        </>
+      )}
 
       {vizinhos.length > 0 && (
         <>
-          <h4>Direct neighbours</h4>
+          <h4>Vínculos diretos</h4>
           <div className="chips">
             {vizinhos.map((id) => {
               const v = byId.get(id)
               return (
-                <button
-                  key={id}
-                  className={`chip ${v?.ring_id ? 'chip-ring' : ''}`}
-                  onClick={() => onPick(id)}
-                  title={v?.ring_id ? `ring ${v.ring_id}` : 'no known ring'}
-                >
+                <button key={id} className={`chip ${v?.vencido > 0 ? 'chip-ring' : ''}`} onClick={() => onPick(id)}>
                   {v?.label ?? id.slice(0, 12)}
                 </button>
               )
@@ -923,36 +1007,13 @@ function NodePanel({ node, neighbours, byId, hovering, pinned, depth, onPick, on
           </div>
         </>
       )}
-
       <code className="id">{node.id}</code>
-      {hovering && !pinned && (
-        <p className="muted small">Neighbours highlighted; the rest of the graph is dimmed.</p>
-      )}
       {pinned && (
         <p className="muted small">
-          Node pinned: hovering the graph still isolates neighbours, but no longer swaps this panel.
+          Nó fixado: passar o mouse no grafo continua isolando vínculos, mas não troca mais este
+          painel.
         </p>
       )}
-    </div>
-  )
-}
-
-/** Segmentado de escopo. Mesma linguagem visual dos botões de profundidade. */
-function ScopePicker({ value, onChange, labels, disabled }) {
-  return (
-    <div className="scope-row" role="group" aria-label="Search scope">
-      {labels.map(([key, label]) => (
-        <button
-          key={key}
-          type="button"
-          className="scope-btn"
-          aria-pressed={value === key}
-          disabled={disabled && key === 'rede'}
-          onClick={() => value !== key && onChange(key)}
-        >
-          {label}
-        </button>
-      ))}
     </div>
   )
 }
@@ -974,10 +1035,10 @@ function metricTone(ms) {
 }
 
 function HealthBadge({ health }) {
-  if (!health) return <span className="badge badge-warn">checking…</span>
-  if (health.status === 'ok') return <span className="badge badge-ok">✓ all ready</span>
-  if (health.status === 'offline') return <span className="badge badge-bad">✕ backend offline</span>
-  return <span className="badge badge-warn">⚠ degraded</span>
+  if (!health) return <span className="badge badge-warn">verificando…</span>
+  if (health.status === 'ok') return <span className="badge badge-ok">✓ tudo pronto</span>
+  if (health.status === 'offline') return <span className="badge badge-bad">✕ backend fora do ar</span>
+  return <span className="badge badge-warn">⚠ degradado</span>
 }
 
 function StatusLine({ ready, label, status }) {
@@ -988,26 +1049,48 @@ function StatusLine({ ready, label, status }) {
   )
 }
 
-function Degraded({ d, feature }) {
+/**
+ * Saturação, que não é indisponibilidade.
+ *
+ * O backend limita quantas consultas analíticas rodam ao mesmo tempo e recusa o
+ * excedente com 429 em vez de enfileirar. Medido: sem esse limite, 64 clientes
+ * simultâneos levavam a p95 da consulta da tela de 308 ms para 2 s. A tela diz o
+ * que aconteceu, porque "tente de novo" e "está fora do ar" pedem reações
+ * diferentes de quem está apresentando.
+ */
+function Saturado({ d }) {
   return (
     <p className="notice notice-warn">
-      {feature} unavailable (<code>{d.index ?? '—'}</code>: {d.status}). The traversal keeps working —
-      degradation is per feature, not per screen.
+      Consulta analítica saturada — {d.hint ?? 'tente de novo em instantes.'} Recusar cedo é
+      deliberado: preserva a latência da consulta interativa.
     </p>
   )
 }
 
-function pipelinePreview(personId, net) {
-  const q = net?.query
-  const stage = {
-    from: 'connections',
-    startWith: '$_id',
-    connectFromField: 'to',
-    connectToField: 'from',
-    as: 'network',
-    maxDepth: net?.depth ?? 1,
-    depthField: 'hops',
-  }
-  if (q?.restrict_search_with_match) stage.restrictSearchWithMatch = q.restrict_search_with_match
-  return [{ $match: { _id: personId } }, { $graphLookup: stage }]
+function Degraded({ d, feature }) {
+  return (
+    <p className="notice notice-warn">
+      {feature} indisponível (<code>{d.index ?? '—'}</code>: {d.status}). O traversal continua
+      funcionando — a degradação é por recurso, não por tela.
+    </p>
+  )
+}
+
+function pipelinePreview(cnpj, group) {
+  return [
+    { $match: { cnpj } },
+    {
+      $graphLookup: {
+        from: 'ownership',
+        startWith: '$_id',
+        // Subir a cadeia: quem é dono de mim. Descer troca os dois campos.
+        connectFromField: 'owner_id',
+        connectToField: 'owned_id',
+        as: 'chain',
+        maxDepth: group?.depth ?? 3,
+        depthField: 'level',
+      },
+    },
+    { $lookup: { from: 'credit_exposure', localField: 'chain.owned_id', foreignField: 'company_id', as: 'credit' } },
+  ]
 }

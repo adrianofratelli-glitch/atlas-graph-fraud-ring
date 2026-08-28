@@ -1,85 +1,77 @@
 # ADR 0001 — Topology of the synthetic data
 
-**Status:** accepted · **Date:** 2026-08-26 (revised 2026-08-27)
+**Status:** accepted · **Date:** 2026-08-26 (rewritten 2026-08-28 when the project's
+use case moved from dense fraud rings to ownership chains)
 
 ## Context
 
-The demo depends on the graph growing visibly between depth 1 and depth 4. That is
-not a property of `$graphLookup`: it is a property of the data. Three topologies
-were tested and measured before the backend existed.
+The demo depends on the group growing visibly between depth 1 and depth 2, and on
+staying stable after that. That is not a property of `$graphLookup`: it is a
+property of the data. A generated ownership base can easily produce either a bare
+triangle or the whole group at the first hop, and both kill the demonstration.
 
 ## Alternatives measured
 
 | Topology | Measured result | Why it was discarded |
 |---|---|---|
-| One address for the whole network | a 20-member ring complete at depth 1 (422 edges, 20 nodes) | it becomes a clique; nothing is left for step 3 of the script to show |
-| Chain (each member linked to the next) | would need depth 19 to reveal a 20-member ring | above the backend cap, and the growth is too linear to read |
-| Shared attribute drawn at random in the clean population | average degree 8.6; depth 2 reached 1,096 of 2,000 nodes | the fraud ring is lost in the noise; the graph becomes unreadable |
+| Holding with a single level of subsidiaries (the first version) | depth 1 and depth 6 returned exactly the same companies | the depth control decides nothing; the presenter clicks and nothing changes |
+| Groups of 11 companies over four levels | the reveal worked, but the graph on screen read as a thin tree | for a conglomerate story, 11 nodes does not look like a conglomerate |
+| Uniform shareholder assignment across 150,000 individuals | ~17 companies per person | every pair of companies shares a shareholder; the finding stops being a finding |
 
 ## Decision
 
-A tree with branching factor **4**, with the shared attributes following the same
-tree and never the whole ring:
+**Four levels, 25 companies, one sector per group.** Holding → 3 sub-holdings → 9
+controlled → 12 operating, with the credit applicant at the bottom so that walking
+up matters.
 
-- **device:** each parent/child pair shares a device — it is the edge that creates
-  the tree;
-- **address:** shared within a branch (parent + direct children);
-- **destination PIX key:** each member pays into the account of their branch's
-  parent, so the payers of one key are exactly the **siblings** of that branch.
+**Cross-holdings.** Two edges per showcase group deliberately break the tree, so a
+node is reachable by two paths. Without them the traversal never revisits an edge
+and the deduplication of the result is untested — which is how a real group behaves
+and a generated one usually does not.
 
-In the clean population, sharing is **structured, not drawn at random**: households
-of 2 to 3 people (18% of the population) and 4% of transactions operated from a
-neighbouring account's device. Random people sharing an address would create an
-artificial connected component.
+**A bridge shareholder every two groups.** One individual holds a minority stake in
+two conglomerates the registry treats as unrelated. It is the finding that does not
+exist in any single record. One in two, not all — if every group had one, it would
+not be news.
+
+**One sector per group, many CNAE codes.** Each showcase group draws its activity
+codes from a single sector, so the group looks diversified by code and is
+concentrated in fact. That is what the vector-search panel finds on its own, and it
+is real credit concentration.
+
+**A long-tailed shareholder distribution over 800,000 individuals.** 85% of
+companies draw from the wide population; 15% draw from a narrow 2% band that plays
+the recurring-shareholder role. The population size is a modelling decision, not a
+volume one.
 
 ## The revision that mattered
 
-The first version of the PIX funnel spread payments across five fixed collectors
-per ring. Materialisation turns the payers of one key into a clique, and cliques of
-six to seven members collapsed the ring's diameter: entering from **any** node
-brought 22 of 30 members at the first hop. The reveal by depth — the spine of the
-demonstration — stopped existing.
+The first version defined a group root as "a legal entity with no corporate owner
+**among the edges already walked**". Two failures came out of that, in opposite
+directions:
 
-Paying the branch parent fixes it: groups of four, and the PIX edge links sibling
-to sibling, complementing the device edge (parent to child) instead of duplicating
-it.
+1. discarding any entity that appeared as *owned* excluded the holding itself — its
+   individual shareholders produce edges where the holding is the owned side — and
+   the group came back with two companies instead of eight, with no error;
+2. after fixing that, a node in the middle of the tree was promoted to root
+   whenever the depth ran out before reaching its owner. At depth 1 the descent
+   from that false root returned 19 of the group's 25 companies, and the depth
+   control looked broken.
 
-A second, related lesson came from choosing the entry point. Ranking ring members
-by degree picks the funnel collector, and entering there also brings the whole ring
-at depth 1. Ranking by *low* degree picks a leaf, and the ring only closes at depth
-5. The leader — the root of the tree — is the node that gives the readable curve,
-and that is what `_entry_nodes` prefers; the degree ranking is only a fallback for
-rings whose leader has no materialised edges.
+The root is now confirmed against the database with one indexed `$lookup` inside
+the same aggregation: a root is a company with no corporate owner **in
+`ownership`**, not one that happens to be missing from the walked set.
 
 ## Measured consequence
 
-A 30-member ring, entering through the leader, on the full dataset (150,000
-people):
+Entering through the applicant of a showcase group:
 
-| Depth | Nodes | Ring members reached |
-|---|---|---|
-| 1 | 7 | 7/30 |
-| 2 | 16 | 16/30 |
-| 3 | 31 | **30/30** |
-| 4 | 31 | 30/30 |
-| 5 | 31 | 30/30 |
+| Depth | Companies | Consolidated limit | Overdue |
+|---|---|---|---|
+| 1 | 5 | R$ 11.8 M | R$ 0 |
+| 2 | 25 | R$ 197.2 M | R$ 11.2 M |
+| 3+ | 25 | R$ 197.2 M | R$ 11.2 M |
 
-The reveal is gradual and readable — which is what step 3 of the script needs. From
-depth 3 on the traversal saturates: the ring is a closed component, and there is no
-leakage into the clean population.
-
-The edge-type toggle also became meaningful. At depth 3, disabling the device edge
-collapses the network from 31 nodes to 3, while disabling address or destination
-key changes almost nothing — so the analyst can test, live, which link actually
-holds the ring together.
-
-**This is a consequence, not a goal, and it changed the script.** An earlier version
-of this ADR predicted that depth 4 would start reaching legitimate people, which was
-confirmed on the reduced test dataset (where hubs fall below the pruning threshold)
-but **not** on the full dataset, where they are discarded at materialisation.
-Degradation by fan-out exists and is measurable — it just is not here. It is
-measured in `LIMITATIONS.md §4`, starting from a hub, and the script was corrected
-to show it there.
-
-Documenting the prediction that did not hold is deliberate: it is exactly the kind
-of detail an architect on the customer's side will test.
+The applicant's own record: rating A, R$ 2.1 M limit, nothing overdue. The reveal
+between depth 1 and depth 2 is the demo, and the flat line after it is the
+argument — a shallow tree saturates, so depth costs nothing here.

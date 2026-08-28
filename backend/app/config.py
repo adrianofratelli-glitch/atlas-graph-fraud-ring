@@ -12,10 +12,11 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 class Settings:
     mongodb_uri: str = os.environ["MONGODB_URI"]
-    db_name: str = os.getenv("MONGODB_DB", "graph_fraud_ring")
+    db_name: str = os.getenv("MONGODB_DB", "graph_grupo_economico")
 
-    search_index: str = os.getenv("ATLAS_SEARCH_INDEX_NAME", "people_entity_resolution")
-    vector_index: str = os.getenv("VECTOR_INDEX_NAME", "transactions_reason_vector")
+    company_search_index: str = os.getenv("ATLAS_SEARCH_INDEX_NAME", "companies_name_resolution")
+    people_search_index: str = os.getenv("PEOPLE_SEARCH_INDEX_NAME", "people_name_resolution")
+    vector_index: str = os.getenv("VECTOR_INDEX_NAME", "activities_vector")
 
     voyage_api_key: str = os.getenv("VOYAGE_API_KEY", "")
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "voyage-3-lite")

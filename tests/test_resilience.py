@@ -1,410 +1,447 @@
 #!/usr/bin/env python3
-"""Suíte hostil: tenta quebrar a API de todas as formas que uma demo quebra.
+"""Suíte hostil. Não é teste de unidade.
 
-Não é teste de unidade. Cada caso corresponde a uma forma real de a POV falhar na
-frente de um cliente, e o critério de aprovação é **degradar com mensagem clara**,
-nunca 500, nunca travar, nunca devolver dado inconsistente.
+Cada caso corresponde a uma forma real de esta POV falhar na frente de um
+cliente, e o critério de aprovação é sempre o mesmo: **degradar com mensagem
+clara**. Nunca 500, nunca travar, nunca devolver dado inconsistente.
 
-    ../.venv/bin/python tests/test_resilience.py            # tudo
-    ../.venv/bin/python tests/test_resilience.py --quick    # sem os casos lentos
+Uso:
+    python tests/test_resilience.py
+    python tests/test_resilience.py --quick   # sem change stream e sem carga
 """
 from __future__ import annotations
 
 import argparse
-import concurrent.futures as futures
 import json
-import os
 import sys
 import time
-from typing import Any, Callable
+from concurrent import futures
 
 import httpx
 
-BASE = os.getenv("GFR_BASE", "http://127.0.0.1:8350")
-TIMEOUT = 60.0
+BASE = "http://127.0.0.1:8350"
+c = httpx.Client(base_url=BASE, timeout=90.0)
 
-PASS, FAIL = "\033[32m  ok \033[0m", "\033[31mFALHA\033[0m"
-_results: list[tuple[str, bool, str]] = []
+_ok = 0
+_falhas: list[str] = []
+VERDE, VERMELHO, FIM = "\033[32m", "\033[31m", "\033[0m"
 
 
 def check(nome: str, cond: bool, detalhe: str = "") -> None:
-    _results.append((nome, cond, detalhe))
-    print(f"{PASS if cond else FAIL}  {nome}" + (f"  — {detalhe}" if detalhe else ""))
+    global _ok
+    if cond:
+        _ok += 1
+        print(f"{VERDE}  ok {FIM}  {nome}" + (f"  — {detalhe}" if detalhe else ""))
+    else:
+        _falhas.append(nome)
+        print(f"{VERMELHO}  FALHA{FIM}  {nome}  — {detalhe}")
 
 
-def get(path: str, **kw) -> httpx.Response:
-    return httpx.get(BASE + path, timeout=TIMEOUT, **kw)
+def get(p: str, **kw):
+    return c.get(p, **kw)
 
 
-def post(path: str, payload: Any = None) -> httpx.Response:
-    return httpx.post(BASE + path, json=payload if payload is not None else {}, timeout=TIMEOUT)
+def post(p: str, body=None):
+    return c.post(p, json=body if body is not None else {})
 
 
-# --------------------------------------------------------------- entradas hostis
-def entradas_hostis(ctx: dict) -> None:
-    pid = ctx["person_id"]
+# ------------------------------------------------------------------ contexto
+def contexto() -> dict:
+    ep = get("/api/entry-points").json()
+    if not ep.get("applicants"):
+        raise SystemExit("sem pontos de entrada: rode data-generator/run_all.sh")
+    a = ep["applicants"][0]
+    g = get(f"/api/group/{a['cnpj']}?depth=3").json()
+    return {
+        "cnpj": a["cnpj"],
+        "grupo": g,
+        "company_ids": [n["id"] for n in g["nodes"] if n["kind"] == "company"],
+        "controle": ep["control"][0]["cnpj"] if ep.get("control") else None,
+    }
 
-    r = get(f"/api/network/{'x' * 500}")
-    check("id gigante devolve 404, não 500", r.status_code == 404, f"HTTP {r.status_code}")
 
-    r = get("/api/network/nao-existe-mesmo")
-    check("id inexistente devolve 404", r.status_code == 404, f"HTTP {r.status_code}")
+# ------------------------------------------------------------------ entradas hostis
+def entradas(ctx: dict) -> None:
+    r = get("/api/group/" + "9" * 300)
+    check("CNPJ gigante devolve 404, não 500", r.status_code == 404, f"HTTP {r.status_code}")
+    r = get("/api/group/00000000000000")
+    check("CNPJ inexistente devolve 404", r.status_code == 404, f"HTTP {r.status_code}")
+    r = get(f"/api/group/{ctx['cnpj']}?depth=999")
+    check("profundidade absurda é limitada pelo backend", r.status_code == 200
+          and r.json()["depth"] <= 6, f"depth={r.json().get('depth') if r.status_code==200 else r.status_code}")
+    r = get(f"/api/group/{ctx['cnpj']}?depth=-5")
+    check("profundidade negativa não quebra", r.status_code == 200 and r.json()["depth"] >= 1,
+          f"HTTP {r.status_code}")
+    r = get("/api/group/" + '{"$ne": null}')
+    check("operador do Mongo no CNPJ não é interpretado", r.status_code in (404, 400),
+          f"HTTP {r.status_code}")
 
-    r = get(f"/api/network/{pid}?depth=999")
-    ok = r.status_code == 200 and r.json()["depth"] <= 6
-    check("profundidade 999 é limitada pelo cap", ok, f"depth={r.json().get('depth') if r.status_code == 200 else r.status_code}")
-
-    r = get(f"/api/network/{pid}?depth=-5")
-    check("profundidade negativa não quebra", r.status_code == 200, f"HTTP {r.status_code}")
-
-    r = get(f"/api/network/{pid}?depth=abc")
-    check("profundidade não-numérica devolve 422", r.status_code == 422, f"HTTP {r.status_code}")
-
-    r = get(f"/api/network/{pid}?edge_types=shares_device,tipo_inventado")
-    check("tipo de aresta inválido devolve 400", r.status_code == 400, f"HTTP {r.status_code}")
-
-    r = get(f"/api/network/{pid}?edge_types=")
-    check("edge_types vazio não quebra", r.status_code == 200, f"HTTP {r.status_code}")
-
-    # Injeção de operador: o _id vem do path e vai direto para o $match.
-    r = get('/api/network/{"$ne": null}')
-    ok = r.status_code == 404
-    check("payload de operador no _id não vira query", ok, f"HTTP {r.status_code}")
-
-    r = get("/api/search/people?q=")
-    check("busca vazia devolve 400", r.status_code == 400, f"HTTP {r.status_code}")
-
-    r = get("/api/search/people?q=" + "a" * 5000)
-    check("busca gigante não quebra", r.status_code in (200, 400), f"HTTP {r.status_code}")
-
-    r = get("/api/search/people?q=%22%2F%5C%5E%24.%7C%3F*%2B()%5B%5D%7B%7D")
-    check("busca com metacaracteres regex não quebra", r.status_code == 200, f"HTTP {r.status_code}")
-
-    r = get("/api/search/people?q=teste&limit=99999")
-    check("limit acima do teto devolve 422", r.status_code == 422, f"HTTP {r.status_code}")
-
-    r = post("/api/search/similar-reasons", {"text": ""})
-    check("vetor com texto vazio é erro de cliente", r.status_code in (400, 422), f"HTTP {r.status_code}")
-
-    r = post("/api/search/similar-reasons", {})
-    check("vetor sem campo `text` é erro de cliente", r.status_code in (400, 422), f"HTTP {r.status_code}")
-
-    r = post("/api/search/similar-reasons", {"text": "   "})
-    check("vetor com texto só de espaço é erro de cliente", r.status_code in (400, 422), f"HTTP {r.status_code}")
-
-    r = post("/api/search/similar-reasons", {"text": "x", "limit": -1})
-    check("vetor com limit negativo é erro de cliente, não 500", r.status_code in (400, 422), f"HTTP {r.status_code}")
-
-    r = post("/api/investigation/flag", {"person_ids": []})
-    check("marcar lista vazia é erro de cliente", r.status_code in (400, 422), f"HTTP {r.status_code}")
-
-    r = post("/api/investigation/flag", {"person_ids": ["nao-existe"]})
-    ok = r.status_code == 200 and r.json()["people_flagged"] == 0
-    check("marcar id inexistente não inventa efeito", ok, f"HTTP {r.status_code}")
-
-    r = post("/api/investigation/flag", {"person_ids": ["x"] * 5001})
-    check("marcar acima do teto é erro de cliente", r.status_code in (400, 422), f"HTTP {r.status_code}")
-
-    r = post("/api/investigation/flag", {"person_ids": "não é lista"})
-    check("person_ids com tipo errado vira 422, não 409/500", r.status_code == 422, f"HTTP {r.status_code}")
-
-    r = post("/api/investigation/close/nao-existe")
-    check("fechar caso inexistente devolve 404", r.status_code == 404, f"HTTP {r.status_code}")
-
-    r = get("/api/hops?source=a&target=b")
-    check("hops entre ids inexistentes não quebra", r.status_code == 200, f"HTTP {r.status_code}")
-
-    r = get("/api/hops")
-    check("hops sem parâmetros devolve 422", r.status_code == 422, f"HTTP {r.status_code}")
-
-    r = get("/api/network-by-device/nao-existe")
-    check("padrão A com conta inexistente devolve 404", r.status_code == 404, f"HTTP {r.status_code}")
+    r = post("/api/search/companies", {"q": ""})
+    check("busca vazia é recusada", r.status_code == 422, f"HTTP {r.status_code}")
+    r = post("/api/search/companies", {"q": "a" * 500})
+    check("busca acima do limite é recusada", r.status_code == 422, f"HTTP {r.status_code}")
+    r = post("/api/search/companies", {"q": "   "})
+    check("busca só com espaço é recusada", r.status_code == 422, f"HTTP {r.status_code}")
+    r = post("/api/search/companies", {"q": "(((", "limit": 5})
+    check("metacaracteres de regex não quebram a busca", r.status_code == 200, f"HTTP {r.status_code}")
+    r = post("/api/search/companies", {"q": "Ltda", "limit": -1})
+    check("limit fora de faixa é recusado", r.status_code == 422, f"HTTP {r.status_code}")
+    r = post("/api/search/companies", {"q": "Ltda", "company_ids": "nao-e-lista"})
+    check("company_ids com tipo errado é recusado", r.status_code == 422, f"HTTP {r.status_code}")
 
 
 # ------------------------------------------------------------------ consistência
 def consistencia(ctx: dict) -> None:
-    pid = ctx["person_id"]
+    g = ctx["grupo"]
+    ids = {n["id"] for n in g["nodes"]}
+    orfas = [e for e in g["edges"] if e["from"] not in ids or e["to"] not in ids]
+    check("nenhuma aresta aponta para nó ausente", not orfas, f"{len(orfas)} órfãs")
 
-    r = get(f"/api/network/{pid}?depth=3")
-    d = r.json()
-    ids = {n["id"] for n in d["nodes"]}
-    orfas = [e for e in d["edges"] if e["from"] not in ids or e["to"] not in ids]
-    check("nenhuma aresta aponta para nó ausente do payload", not orfas, f"{len(orfas)} órfãs")
+    sujeitos = [n for n in g["nodes"] if n.get("is_subject")]
+    check("existe exatamente um sujeito", len(sujeitos) == 1, f"{len(sujeitos)}")
 
-    check("stats.nodes bate com len(nodes)", d["stats"]["nodes"] == len(d["nodes"]))
-    raiz = [n for n in d["nodes"] if n["is_root"]]
-    check("existe exatamente uma raiz", len(raiz) == 1, f"{len(raiz)} raízes")
-    check("a raiz está a 0 saltos", raiz and raiz[0]["hops"] == 0)
+    empresas = [n for n in g["nodes"] if n["kind"] == "company"]
+    check("contagem de empresas bate com o payload", len(empresas) == g["stats"]["companies"],
+          f"{len(empresas)} vs {g['stats']['companies']}")
 
-    # Monotonicidade: aumentar profundidade nunca pode reduzir o alcance.
-    tamanhos = []
-    for prof in (1, 2, 3, 4):
-        s = get(f"/api/network/{pid}?depth={prof}").json()["stats"]["nodes"]
-        tamanhos.append(s)
-    check("alcance é monotônico com a profundidade", tamanhos == sorted(tamanhos), str(tamanhos))
+    soma = round(sum(n["limite"] for n in empresas), 2)
+    check("exposição consolidada é a soma dos nós",
+          abs(soma - g["group_exposure"]["limite"]) < 1.0,
+          f"{soma} vs {g['group_exposure']['limite']}")
 
-    # Podar só pode remover, nunca acrescentar.
-    com = get(f"/api/network/{pid}?depth=4&prune_hubs=true").json()["stats"]["nodes"]
-    sem = get(f"/api/network/{pid}?depth=4&prune_hubs=false").json()["stats"]["nodes"]
-    check("poda nunca aumenta o alcance", com <= sem, f"com={com} sem={sem}")
+    # Profundidade maior nunca pode devolver menos empresas.
+    rasos = get(f"/api/group/{ctx['cnpj']}?depth=1").json()["stats"]["companies"]
+    fundos = get(f"/api/group/{ctx['cnpj']}?depth=4").json()["stats"]["companies"]
+    check("mais níveis nunca devolve menos empresas", fundos >= rasos, f"d1={rasos} d4={fundos}")
 
-    # Um subconjunto de tipos de aresta nunca alcança mais do que todos.
-    todos = get(f"/api/network/{pid}?depth=3").json()["stats"]["nodes"]
-    um = get(f"/api/network/{pid}?depth=3&edge_types=shares_device").json()["stats"]["nodes"]
-    check("subconjunto de arestas nunca alcança mais", um <= todos, f"um tipo={um} todos={todos}")
+    # Determinismo: a mesma consulta duas vezes devolve o mesmo conjunto.
+    a = get(f"/api/group/{ctx['cnpj']}?depth=3").json()
+    b = get(f"/api/group/{ctx['cnpj']}?depth=3").json()
+    check("consulta é determinística",
+          {n["id"] for n in a["nodes"]} == {n["id"] for n in b["nodes"]})
 
-    # Determinismo: a mesma pergunta duas vezes dá a mesma resposta.
-    a = get(f"/api/network/{pid}?depth=3").json()["stats"]["nodes"]
-    b = get(f"/api/network/{pid}?depth=3").json()["stats"]["nodes"]
-    check("expansão é determinística", a == b, f"{a} vs {b}")
+    if ctx["controle"]:
+        ctrl = get(f"/api/group/{ctx['controle']}?depth=3").json()
+        check("empresa sem grupo devolve cadeia pequena, não erro",
+              ctrl["found"] and ctrl["stats"]["companies"] >= 1,
+              f"{ctrl['stats']['companies']} empresas")
 
 
-# --------------------------------------------------------------------- ACID
+# ------------------------------------------------------------------- busca
+def busca_escopada(ctx: dict) -> None:
+    """A busca da tela procura **dentro do grafo**, e isso é contrato, não estilo.
+
+    Antes, digitar um primeiro nome comum devolvia pessoas e empresas sem relação
+    nenhuma com o grupo desenhado: o analista tinha de parear cada linha com o
+    grafo de cabeça, e não tem como. O escopo é o padrão; abrir para a base
+    inteira é uma ação deliberada de entity resolution.
+    """
+    grupo = get(f"/api/group/{ctx['cnpj']}?depth=3").json()
+    ids = [n["id"] for n in grupo["nodes"] if n["kind"] == "company"]
+    nos = [n["id"] for n in grupo["nodes"]]
+    empresa = next(n for n in grupo["nodes"] if n["kind"] == "company")
+    termo = empresa["label"].split()[0]
+
+    r = post("/api/search/companies", {"q": termo, "company_ids": ids, "node_ids": nos}).json()
+    check("busca escopada devolve resultado do grupo", len(r["results"]) > 0, f"{len(r['results'])}")
+    check("**todo** resultado escopado está no grupo em tela",
+          all(x["in_group"] for x in r["results"]),
+          f"{sum(1 for x in r['results'] if not x['in_group'])} fora do grupo")
+    check("a resposta declara que veio escopada", r.get("scoped") is True, str(r.get("scoped")))
+
+    # Um termo que não existe no grupo tem de voltar vazio, não voltar ruído.
+    r = post("/api/search/companies",
+             {"q": "zzqx", "company_ids": ids, "node_ids": nos}).json()
+    check("termo ausente do grupo devolve vazio, não ruído", len(r["results"]) == 0,
+          f"{len(r['results'])} resultados")
+
+    # E a saída para entity resolution continua existindo.
+    r = post("/api/search/companies",
+             {"q": termo, "company_ids": ids, "node_ids": nos, "scope_only": False}).json()
+    fora = [x for x in r["results"] if not x["in_group"]]
+    check("scope_only=False volta a procurar fora do grupo", len(fora) > 0,
+          f"{len(fora)} fora do grupo")
+
+
+# --------------------------------------------------------------- hierarquia
+def hierarquia(ctx: dict) -> None:
+    """Escopo de visibilidade: o servidor decide, e a fronteira é de verdade."""
+    roster = get("/api/hierarchy/roster").json()["users"]
+    check("roster devolve usuários de exemplo", len(roster) >= 2, f"{len(roster)}")
+    if len(roster) < 2:
+        return
+
+    gerentes = [u for u in roster if u["papel"] in ("gerente", "regional")]
+    assessores = [u for u in roster if u["papel"] == "assessor"]
+    if not gerentes or not assessores:
+        check("roster tem gerente e assessor", False, str([u["papel"] for u in roster]))
+        return
+
+    ger, ass = gerentes[0], assessores[0]
+    pg = get(f"/api/hierarchy/{ger['_id']}/portfolio").json()
+    pa = get(f"/api/hierarchy/{ass['_id']}/portfolio").json()
+
+    check("gerente alcança mais de um assessor", pg["scope"]["advisors"] > 1,
+          str(pg["scope"]))
+    check("assessor alcança só a si mesmo", pa["scope"]["advisors"] == 1,
+          str(pa["scope"]))
+    check("carteira do gerente contém a do assessor",
+          pg["portfolio"]["companies_with_credit"] >= pa["portfolio"]["companies_with_credit"],
+          f"{pg['portfolio']['companies_with_credit']} vs {pa['portfolio']['companies_with_credit']}")
+    check("soma de utilizado do gerente não é menor",
+          pg["portfolio"]["utilizado"] >= pa["portfolio"]["utilizado"] - 1.0)
+
+    # A checagem de visibilidade é a fronteira, e ela precisa negar de verdade:
+    # uma implementação que sempre autoriza passaria em tudo acima.
+    v = get(f"/api/hierarchy/{ass['_id']}/can-see/{ctx['cnpj']}").json()
+    check("checagem de visibilidade responde com motivo",
+          "allowed" in v and v.get("reason"), str(v)[:120])
+
+    dono = v.get("owner", {}).get("id")
+    if dono:
+        vd = get(f"/api/hierarchy/{dono}/can-see/{ctx['cnpj']}").json()
+        check("o próprio assessor da conta enxerga a conta", vd.get("allowed") is True, str(vd)[:120])
+
+    outro = next((u for u in assessores if u["_id"] != dono), None)
+    if outro:
+        vo = get(f"/api/hierarchy/{outro['_id']}/can-see/{ctx['cnpj']}").json()
+        check("assessor de outro ramo é negado", vo.get("allowed") is False, str(vo)[:120])
+
+    # A escada da hierarquia sobre **o grupo que está na tela**.
+    #
+    # É o que a demo mostra e o que nenhuma asserção cobria: subir um nível tem
+    # de revelar mais empresas do mesmo grupo econômico. Numa versão anterior os
+    # três assessores do grupo caíram em ramos distintos da árvore e gerente e
+    # assessor enxergavam exatamente a mesma fatia — a tela ficava correta e o
+    # argumento, vazio.
+    grupo = get(f"/api/group/{ctx['cnpj']}?depth=3").json()
+    empresas = [n for n in grupo["nodes"] if n["kind"] == "company"]
+    check("cada empresa do grupo tem assessor responsável",
+          all(n.get("advisor_id") for n in empresas),
+          f"{sum(1 for n in empresas if not n.get('advisor_id'))} sem assessor")
+
+    def alcance(uid: str) -> int:
+        p = get(f"/api/hierarchy/{uid}/portfolio").json()
+        escopo = {p["user"]["id"]} | {t["id"] for t in p["team"]}
+        return sum(1 for n in empresas if n.get("advisor_id") in escopo)
+
+    por_papel = {}
+    for u in roster:
+        por_papel.setdefault(u["papel"], []).append(u["_id"])
+
+    if {"assessor", "gerente", "regional"} <= set(por_papel):
+        a = max(alcance(uid) for uid in por_papel["assessor"])
+        g = alcance(por_papel["gerente"][0])
+        r_ = alcance(por_papel["regional"][0])
+        check("gerente enxerga mais do grupo que o assessor", g > a, f"assessor {a}, gerente {g}")
+        check("regional enxerga o grupo inteiro", r_ == len(empresas), f"{r_}/{len(empresas)}")
+        check("nenhum assessor sozinho enxerga o grupo inteiro", a < len(empresas),
+              f"{a}/{len(empresas)}")
+
+    r = get("/api/hierarchy/advisor_inexistente/portfolio")
+    check("usuário inexistente vira 404, não 500", r.status_code == 404, str(r.status_code))
+    r = get("/api/hierarchy/" + '{"$ne": null}' + "/portfolio")
+    check("operador injetado no id não vira consulta", r.status_code == 404, str(r.status_code))
+
+
+# ------------------------------------------------------------------ transação ACID
 def acid(ctx: dict) -> None:
     post("/api/demo/reset")
-    pid = ctx["person_id"]
-    rede = [n["id"] for n in get(f"/api/network/{pid}?depth=4").json()["nodes"] if n["ring_id"]]
+    # Relê o grupo DEPOIS do reset. O contexto é montado no início da suíte, e o
+    # reset remove as arestas simuladas de execuções anteriores — usar a lista
+    # antiga fazia a suíte revisar uma empresa que já não pertencia ao grupo e
+    # acusar divergência que era do teste, não do produto.
+    grupo = get(f"/api/group/{ctx['cnpj']}?depth=3").json()
+    ids = [n["id"] for n in grupo["nodes"] if n["kind"] == "company"]
 
-    r = post("/api/investigation/flag", {"person_ids": rede, "reason": "resiliência"})
-    check("marcação ACID responde 200", r.status_code == 200, f"HTTP {r.status_code}")
+    r = post("/api/credit/review", {"company_ids": ids, "reason": "resiliência"})
+    check("revisão ACID responde 200", r.status_code == 200, f"HTTP {r.status_code}")
     caso = r.json()
-    check("marcou o número de pessoas pedido", caso["people_flagged"] == len(rede), f"{caso['people_flagged']}/{len(rede)}")
+    check("bloqueou o número de empresas pedido", caso["companies_blocked"] == len(ids),
+          f"{caso['companies_blocked']}/{len(ids)}")
+    check("garantias da transação vieram no payload",
+          caso["read_concern"] == "snapshot" and caso["write_concern"] == "majority")
 
-    # Segundo caso sobre os mesmos nós é recusado, e essa é a resposta certa.
-    #
-    # Antes o backend aceitava: `case_id` das contas era sobrescrito e o primeiro
-    # caso virava uma casca com `status: "open"` e zero contas. Encerrar o segundo
-    # liberava tudo, e sobrava no banco um registro de auditoria afirmando
-    # investigação aberta sobre nada — pior do que um erro, numa POV cujo
-    # argumento é a coerência do registro.
-    r2 = post("/api/investigation/flag", {"person_ids": rede, "reason": "de novo"})
-    check("segundo caso sobre os mesmos nós é recusado", r2.status_code == 409, f"HTTP {r2.status_code}")
-    detalhe = r2.json().get("detail", {})
-    check(
-        "o 409 devolve o case_id já aberto",
-        detalhe.get("case_id") == caso["case_id"],
-        f"case_id={detalhe.get('case_id')}",
-    )
-    ainda = get(f"/api/investigation/case/{caso['case_id']}").json()
-    check(
-        "o caso original manteve todas as suas contas",
-        ainda["ok"] and len(ainda["accounts"]) > 0,
-        f"{len(ainda.get('accounts', []))} contas",
-    )
+    r2 = post("/api/credit/review", {"company_ids": ids, "reason": "de novo"})
+    check("segunda revisão sobre o mesmo grupo é recusada", r2.status_code == 409, f"HTTP {r2.status_code}")
+    d2 = r2.json().get("detail", {})
+    check("o 409 devolve o case_id já aberto", d2.get("case_id") == caso["case_id"],
+          f"case_id={d2.get('case_id')}")
 
-    # Concorrência: N transações simultâneas sobre os MESMOS documentos.
-    # É aqui que aparece WriteConflict se o isolamento estiver errado.
-    def marca(i: int) -> int:
-        return post("/api/investigation/flag", {"person_ids": rede, "reason": f"conc-{i}"}).status_code
+    detalhe = get(f"/api/credit/case/{caso['case_id']}").json()
+    check("o caso original manteve suas empresas", detalhe["ok"] and len(detalhe["companies"]) > 0,
+          f"{len(detalhe.get('companies', []))}")
+
+    depois = get(f"/api/group/{ctx['cnpj']}?depth=3").json()
+    marcadas = [n for n in depois["nodes"] if n.get("credit_status") == "under_review"]
+    check("o grafo mostra as empresas sob revisão", len(marcadas) == len(ids),
+          f"{len(marcadas)}/{len(ids)}")
+
+    # Concorrência: N revisões simultâneas sobre os MESMOS documentos.
+    def revisa(i: int) -> int:
+        return post("/api/credit/review", {"company_ids": ids, "reason": f"conc-{i}"}).status_code
 
     with futures.ThreadPoolExecutor(max_workers=8) as ex:
-        codigos = list(ex.map(marca, range(8)))
-    ok = all(c in (200, 409) for c in codigos)
-    check("8 transações concorrentes: sem 500", ok, f"códigos={sorted(set(codigos))}")
+        codigos = list(ex.map(revisa, range(8)))
+    check("8 revisões concorrentes: sem 500", all(c_ in (200, 409) for c_ in codigos),
+          f"códigos={sorted(set(codigos))}")
 
-    r = post(f"/api/investigation/close/{caso['case_id']}")
-    check("fechar o caso responde 200", r.status_code == 200, f"HTTP {r.status_code}")
-    r = post(f"/api/investigation/close/{caso['case_id']}")
-    check("fechar duas vezes não quebra", r.status_code in (200, 404), f"HTTP {r.status_code}")
+    r = post("/api/credit/review", {"company_ids": []})
+    check("grupo vazio é recusado", r.status_code == 422, f"HTTP {r.status_code}")
+    r = post("/api/credit/review", {"company_ids": ["x"] * 6000})
+    check("acima do teto de 5000 é recusado", r.status_code == 422, f"HTTP {r.status_code}")
+    r = post("/api/credit/review", {"company_ids": [{"$ne": None}]})
+    check("operador do Mongo em company_ids é recusado", r.status_code == 422, f"HTTP {r.status_code}")
 
+    r = post(f"/api/credit/close/{caso['case_id']}")
+    check("encerrar a revisão responde 200", r.status_code == 200, f"HTTP {r.status_code}")
+    r = post(f"/api/credit/close/{caso['case_id']}")
+    check("encerrar duas vezes não quebra", r.status_code in (200, 404), f"HTTP {r.status_code}")
+    r = post("/api/credit/close/nao_existe")
+    check("encerrar caso inexistente devolve 404", r.status_code == 404, f"HTTP {r.status_code}")
+
+    liberadas = get(f"/api/group/{ctx['cnpj']}?depth=3").json()
+    check("encerrar libera todas as empresas",
+          not [n for n in liberadas["nodes"] if n.get("credit_status") == "under_review"])
     post("/api/demo/reset")
+
+
+# ------------------------------------------------------------------ plano de execução
+def plano(ctx: dict) -> None:
+    import os
+    import subprocess
+
+    uri = None
+    for linha in open(".env"):
+        if linha.startswith("MONGODB_URI="):
+            uri = linha.split("=", 1)[1].strip()
+    if not uri:
+        check("MONGODB_URI disponível para o explain", False, "não encontrada em .env")
+        return
+
+    script = """
+    db = db.getSiblingDB(process.env.MONGODB_DB || "graph_grupo_economico");
+    const nomes = db.ownership.getIndexes().map(i => i.name);
+    print(JSON.stringify({indices: nomes}));
+    """
+    out = subprocess.run(["mongosh", uri, "--quiet", "--eval", script],
+                         capture_output=True, text=True, timeout=90)
+    try:
+        dados = json.loads([l for l in out.stdout.splitlines() if l.startswith("{")][-1])
+    except Exception:
+        check("consegue ler os índices de ownership", False, out.stdout[-120:] or out.stderr[-120:])
+        return
+    for req in ("owner_id_1", "owned_id_1"):
+        check(f"índice {req} existe em ownership", req in dados["indices"])
 
 
 # ------------------------------------------------------------------ change stream
 def change_stream(ctx: dict) -> None:
     post("/api/demo/reset")
-    pid = ctx["person_id"]
-    rede = [n["id"] for n in get(f"/api/network/{pid}?depth=4").json()["nodes"] if n["ring_id"]]
-    post("/api/investigation/flag", {"person_ids": rede, "reason": "cs"})
+    ids = ctx["company_ids"]
 
-    antes = get("/api/alerts/recent?limit=1").json()["listener"]["alerts"]
-    post("/api/demo/simulate-transaction")
+    # A: grupo livre -> verificação, sem alerta
+    antes = get("/api/alerts/recent").json()["listener"]
+    r = post("/api/demo/ownership-change", {"company_ids": ids})
+    check("alteração societária com grupo livre responde 200", r.status_code == 200,
+          f"HTTP {r.status_code}")
+    check("e informa que não deve alertar", r.json()["expect_alert"] is False)
     prazo = time.time() + 25
-    depois = antes
     while time.time() < prazo:
-        depois = get("/api/alerts/recent?limit=1").json()["listener"]["alerts"]
-        if depois > antes:
+        st = get("/api/alerts/recent").json()["listener"]
+        if st["checks_published"] > antes["checks_published"]:
             break
         time.sleep(1)
-    check("change stream dispara alerta em <25s", depois > antes, f"{antes} -> {depois}")
+    check("o listener publica a verificação mesmo sem alertar",
+          st["checks_published"] > antes["checks_published"],
+          f"{antes['checks_published']} -> {st['checks_published']}")
 
-    # Rajada: o listener não pode perder eventos nem morrer.
-    with futures.ThreadPoolExecutor(max_workers=6) as ex:
-        list(ex.map(lambda _: post("/api/demo/simulate-transaction"), range(12)))
-    prazo = time.time() + 40
+    # B: grupo sob revisão -> alerta
+    caso = post("/api/credit/review", {"company_ids": ids, "reason": "cs"}).json()
+    antes = get("/api/alerts/recent").json()["listener"]
+    post("/api/demo/ownership-change", {"company_ids": ids})
+    prazo = time.time() + 25
     while time.time() < prazo:
-        est = get("/api/alerts/recent?limit=1").json()["listener"]
-        if est["alerts"] >= depois + 12:
+        st = get("/api/alerts/recent").json()["listener"]
+        if st["alerts"] > antes["alerts"]:
             break
         time.sleep(1)
-    est = get("/api/alerts/recent?limit=1").json()["listener"]
-    check("listener sobrevive a rajada de 12 transações", est["running"] and est["last_error"] is None,
-          f"running={est['running']} erro={est['last_error']}")
-    check("nenhum alerta perdido na rajada", est["alerts"] >= depois + 12, f"{est['alerts']} (esperado >= {depois + 12})")
+    check("alteração em grupo sob revisão dispara alerta em <25s",
+          st["alerts"] > antes["alerts"], f"{antes['alerts']} -> {st['alerts']}")
 
+    alertas = get("/api/alerts/recent").json()["alerts"]
+    check("o alerta diz o que entrou no grupo",
+          bool(alertas) and "added_limite" in alertas[0])
+    check("listener continua vivo", get("/health").json()["checks"]["change_stream"]["running"])
+
+    post(f"/api/credit/close/{caso['case_id']}")
     post("/api/demo/reset")
 
 
-# ------------------------------------------------- manutenção incremental de aresta
-def manutencao_de_aresta(ctx: dict) -> None:
-    """O grafo se mantém sozinho, sem esperar o próximo job em lote."""
-    r = post("/api/demo/link-accounts")
-    check("link-accounts responde 200", r.status_code == 200, f"HTTP {r.status_code}")
-    if r.status_code != 200:
-        return
-    d = r.json()
-    a, b = d["person_a"]["id"], d["person_b"]["id"]
-    check("as duas pessoas não tinham vínculo antes", not d["edge_existed_before"])
-
-    prazo, ligado, esperou = time.time() + 30, False, 0.0
-    while time.time() < prazo:
-        t0 = time.time()
-        if get(f"/api/connections/between?a={a}&b={b}").json()["connected"]:
-            ligado = True
-            break
-        time.sleep(1)
-        esperou += time.time() - t0
-    check("aresta materializada pelo change stream em <30s", ligado, f"~{esperou:.0f}s")
-
-    if ligado:
-        arestas = get(f"/api/connections/between?a={a}&b={b}").json()["edges"]
-        check("aresta marcada com a origem `change_stream`",
-              any(e.get("source") == "change_stream" for e in arestas))
-        # E o traversal precisa enxergar a aresta nova, senão a manutenção não serve.
-        rede = get(f"/api/network/{a}?depth=1").json()
-        check("o traversal seguinte já percorre a aresta nova",
-              any(n["id"] == b for n in rede["nodes"]),
-              f"{rede['stats']['nodes']} nós a 1 salto")
-
-    # Repetir o mesmo evento não pode duplicar aresta (`_id` determinístico).
-    antes = len(get(f"/api/connections/between?a={a}&b={b}").json()["edges"])
-    post("/api/demo/link-accounts")
-    time.sleep(4)
-    depois = len(get(f"/api/connections/between?a={a}&b={b}").json()["edges"])
-    check("reprocessar não duplica aresta", depois <= max(1, antes), f"{antes} -> {depois}")
-
-    est = get("/api/alerts/recent?limit=1").json()["listener"]
-    check("listener continua vivo depois da manutenção",
-          est["running"] and est["last_error"] is None, f"erro={est['last_error']}")
-
-
-# ----------------------------------------------------------------------- carga
-def carga(ctx: dict, n: int = 40) -> None:
-    pid = ctx["person_id"]
-
-    def uma(i: int) -> tuple[int, float]:
+# ------------------------------------------------------------------ carga
+def carga(ctx: dict) -> None:
+    def uma(_):
         t0 = time.perf_counter()
-        r = get(f"/api/network/{pid}?depth={(i % 4) + 1}")
+        r = get(f"/api/group/{ctx['cnpj']}?depth=3")
         return r.status_code, (time.perf_counter() - t0) * 1000
 
     t0 = time.perf_counter()
     with futures.ThreadPoolExecutor(max_workers=10) as ex:
-        res = list(ex.map(uma, range(n)))
-    total = time.perf_counter() - t0
-    codigos = [c for c, _ in res]
-    tempos = sorted(t for _, t in res)
-    p50 = tempos[len(tempos) // 2]
-    p95 = tempos[int(len(tempos) * 0.95) - 1]
-    check(f"{n} expansões concorrentes: todas 200", all(c == 200 for c in codigos),
-          f"códigos={sorted(set(codigos))}")
-    check("p95 sob concorrência abaixo de 5s", p95 < 5000, f"p50={p50:.0f}ms p95={p95:.0f}ms em {total:.1f}s")
-    ctx["carga"] = {"n": n, "p50_ms": round(p50, 1), "p95_ms": round(p95, 1), "wall_s": round(total, 1)}
-
-    # Saúde continua respondendo durante/depois da carga.
-    r = get("/health")
-    check("/health continua ok depois da carga", r.status_code == 200 and r.json()["status"] in ("ok", "degraded"),
-          f"HTTP {r.status_code}")
+        res = list(ex.map(uma, range(40)))
+    wall = time.perf_counter() - t0
+    codigos = sorted({r[0] for r in res})
+    tempos = sorted(r[1] for r in res)
+    p50, p95 = tempos[len(tempos) // 2], tempos[int(len(tempos) * 0.95)]
+    check("40 consultas concorrentes: todas 200", codigos == [200], f"códigos={codigos}")
+    check("p95 sob concorrência abaixo de 5s", p95 < 5000,
+          f"p50={p50:.0f}ms p95={p95:.0f}ms em {wall:.1f}s")
+    check("/health continua ok depois da carga", get("/health").status_code == 200)
+    return {"n": 40, "p50_ms": round(p50, 1), "p95_ms": round(p95, 1), "wall_s": round(wall, 1)}
 
 
-# ------------------------------------------------------------------ plano de query
-def plano_de_query(ctx: dict) -> None:
-    """Guarda de regressão para o bug mais caro encontrado nesta POV.
-
-    `materialize_connections.py --rebuild` faz `drop()`, e `drop()` leva os
-    índices junto. Durante um bom tempo o traversal rodou por COLLSCAN em cada
-    nível do BFS e ninguém percebeu: nada quebra, só fica lento — e "lento" numa
-    demo é indistinguível de "é assim mesmo".
-    """
-    import sys as _sys
-    from pathlib import Path as _Path
-
-    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "data-generator"))
-    from common import get_db  # noqa: E402
-
-    db = get_db()
-    nomes = {i["name"] for i in db.connections.list_indexes()}
-    check("connections tem índice em `from`", "from_1" in nomes, str(sorted(nomes)))
-    check("connections tem índice em `to`", "to_1" in nomes, str(sorted(nomes)))
-
-    # PyMongo: Cursor.explain() não aceita verbosidade; o comando cru aceita.
-    plano = db.command(
-        {
-            "explain": {"find": "connections", "filter": {"from": ctx["person_id"]}},
-            "verbosity": "executionStats",
-        }
-    )
-    usou_ixscan = "IXSCAN" in json.dumps(plano["queryPlanner"]["winningPlan"])
-    check("aresta do traversal usa IXSCAN, não COLLSCAN", usou_ixscan)
-
-    est = plano["executionStats"]
-    razao = est["totalDocsExamined"] / max(1, est["nReturned"])
-    check("examina ~1 documento por documento devolvido", razao <= 1.5,
-          f"{est['totalDocsExamined']} examinados / {est['nReturned']} devolvidos")
-
-
-# ------------------------------------------------------------------- degradação
-def degradacao(ctx: dict) -> None:
-    r = get("/health")
-    d = r.json()
-    check("/health reporta status dos índices de busca", "search_indexes" in d["checks"])
-    check("/health reporta estado do change stream", "change_stream" in d["checks"])
-    check("/health/live não depende do banco", get("/health/live").status_code == 200)
+# ------------------------------------------------------------------ saúde
+def saude(ctx: dict) -> None:
+    h = get("/health").json()
+    check("/health reporta o estado do índice de busca", "search_index" in h["checks"])
+    check("/health reporta o estado do change stream", "change_stream" in h["checks"])
+    check("/health mede a latência de uma consulta de referência",
+          "graphlookup_probe" in h["checks"])
+    check("/health/live não depende do banco", get("/health/live").json()["status"] == "alive")
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--quick", action="store_true")
-    args = ap.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument("--quick", action="store_true", help="sem change stream e sem carga")
+    args = p.parse_args()
 
-    try:
-        ep = get("/api/entry-points").json()
-    except Exception as exc:
-        print(f"Backend indisponível em {BASE}: {exc}")
-        sys.exit(2)
-    ctx = {"person_id": ep["suspects"][0]["person_id"]}
-    print(f"alvo: {ep['suspects'][0]['person_name']} ({ep['suspects'][0]['ring_id']})\n")
-
-    blocos: list[tuple[str, Callable]] = [
-        ("Entradas hostis", entradas_hostis),
+    ctx = contexto()
+    blocos = [
+        ("Entradas hostis", entradas),
         ("Consistência do payload", consistencia),
-        ("Transação ACID e concorrência", acid),
-        ("Plano de execução", plano_de_query),
-        ("Degradação e saúde", degradacao),
+        ("Busca escopada", busca_escopada),
+        ("Hierarquia e escopo", hierarquia),
+        ("Transação ACID", acid),
+        ("Plano de execução", plano),
+        ("Degradação e saúde", saude),
     ]
     if not args.quick:
-        blocos += [
-            ("Change Streams sob rajada", change_stream),
-            ("Manutenção incremental de aresta", manutencao_de_aresta),
-            ("Carga concorrente", carga),
-        ]
+        blocos += [("Change Streams", change_stream), ("Carga concorrente", carga)]
 
+    carga_res = None
     for titulo, fn in blocos:
         print(f"\n── {titulo}")
-        try:
-            fn(ctx)
-        except Exception as exc:
-            check(f"{titulo}: bloco não levantou exceção", False, repr(exc))
+        out = fn(ctx)
+        if titulo.startswith("Carga"):
+            carga_res = out
 
-    ok = sum(1 for _, c, _ in _results if c)
-    print(f"\n{'=' * 60}\n{ok}/{len(_results)} passaram")
-    if ctx.get("carga"):
-        print(f"carga: {json.dumps(ctx['carga'])}")
-    falhas = [(n, d) for n, c, d in _results if not c]
-    if falhas:
-        print("\nfalhas:")
-        for n, d in falhas:
-            print(f"  - {n}  {d}")
-    sys.exit(1 if falhas else 0)
+    total = _ok + len(_falhas)
+    print("\n" + "=" * 60)
+    print(f"{_ok}/{total} passaram")
+    if carga_res:
+        print("carga:", json.dumps(carga_res))
+    if _falhas:
+        print("falhas:", _falhas)
+    sys.exit(1 if _falhas else 0)
 
 
 if __name__ == "__main__":

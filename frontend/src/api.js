@@ -17,14 +17,18 @@ async function call(path, options = {}) {
       detail = res.statusText
     }
     const err = new Error(
-      typeof detail === 'string' ? detail : detail?.error ?? 'recurso indisponível'
+      typeof detail === 'string' ? detail : detail?.error ?? 'resource unavailable'
     )
     err.status = res.status
-    // O corpo estruturado segue junto: um 409 de caso já aberto carrega o
+    // O corpo estruturado segue junto: um 409 de revisão já aberta carrega o
     // `case_id`, e a tela usa isso para oferecer a saída em vez de só reclamar.
     err.detail = typeof detail === 'object' ? detail : null
-    // 503 com `feature` é degradação prevista (índice BUILDING/MISSING), não falha.
     err.degraded = res.status === 503 && detail && typeof detail === 'object' ? detail : null
+    // 429 é backpressure deliberado do bulkhead do backend, não indisponibilidade:
+    // a consulta analítica tem poucas vagas e recusa cedo para não atrasar a
+    // consulta interativa. A tela precisa distinguir as duas coisas — "tente de
+    // novo em instantes" e "este recurso está fora" pedem reações diferentes.
+    err.saturado = res.status === 429 && detail && typeof detail === 'object' ? detail : null
     throw err
   }
   return res.json()
@@ -33,46 +37,49 @@ async function call(path, options = {}) {
 export const api = {
   health: () => call('/health'),
   entryPoints: () => call('/api/entry-points'),
-  network: (personId, { depth, edgeTypes, pruneHubs }) => {
-    const p = new URLSearchParams()
-    if (depth != null) p.set('depth', depth)
-    // Sempre enviado, mesmo vazio: omitir o parâmetro significa "todos os tipos"
-    // no backend, então desmarcar as três caixas mostrava o grafo inteiro.
-    p.set('edge_types', (edgeTypes ?? []).join(','))
-    p.set('prune_hubs', pruneHubs ? 'true' : 'false')
-    return call(`/api/network/${encodeURIComponent(personId)}?${p}`)
-  },
-  // As duas buscas recebem a rede que está na tela: uma para escopar/anotar os
-  // nomes, outra para restringir os motivos ao anel investigado.
-  searchPeople: (q, { scope = 'base', personIds, ringIds } = {}) =>
-    call('/api/search/people', {
+  // O caminho principal da demo: consulta pontual por chave de negócio.
+  group: (cnpj, depth) => call(`/api/group/${encodeURIComponent(cnpj)}?depth=${depth}`),
+  // `scopeOnly` é o padrão do backend: a busca da tela procura dentro do grafo em
+  // uso. Abrir para a base inteira é ação deliberada de entity resolution.
+  searchCompanies: (q, { companyIds, nodeIds, scopeOnly = true } = {}) =>
+    call('/api/search/companies', {
       method: 'POST',
-      body: JSON.stringify({ q, scope, person_ids: personIds ?? null, ring_ids: ringIds ?? null }),
+      body: JSON.stringify({
+        q,
+        company_ids: companyIds ?? null,
+        node_ids: nodeIds ?? null,
+        scope_only: scopeOnly,
+      }),
     }),
-  similarReasons: (text, { scope = 'rede', ringIds } = {}) =>
-    call('/api/search/similar-reasons', {
+  // Análise automática: a pergunta é feita pelo grafo, não digitada.
+  concentration: (companyIds) =>
+    call('/api/analysis/concentration', {
       method: 'POST',
-      body: JSON.stringify({ text, scope, ring_ids: ringIds ?? null }),
+      body: JSON.stringify({ company_ids: companyIds }),
     }),
-  flag: (personIds, reason) =>
-    call('/api/investigation/flag', {
+  openReview: (companyIds, reason, groupExposure) =>
+    call('/api/credit/review', {
       method: 'POST',
-      body: JSON.stringify({ person_ids: personIds, reason }),
+      body: JSON.stringify({
+        company_ids: companyIds,
+        reason,
+        group_exposure: groupExposure ?? null,
+      }),
     }),
-  // `person_ids` deixa a injeção acontecer também SEM nada marcado: é a metade
-  // "não alerta" do A/B que prova que o change stream consulta o estado real.
-  simulate: (personIds) =>
-    call('/api/demo/simulate-transaction', {
+  // Hierarquia comercial: o escopo é derivado da árvore no servidor. A tela
+  // manda quem é o usuário, nunca a lista de contas que ele pode ver.
+  roster: () => call('/api/hierarchy/roster'),
+  portfolio: (advisorId) =>
+    call(`/api/hierarchy/${encodeURIComponent(advisorId)}/portfolio`),
+  canSee: (advisorId, cnpj) =>
+    call(`/api/hierarchy/${encodeURIComponent(advisorId)}/can-see/${encodeURIComponent(cnpj)}`),
+  caseDetail: (caseId) => call(`/api/credit/case/${encodeURIComponent(caseId)}`),
+  closeReview: (caseId) =>
+    call(`/api/credit/close/${encodeURIComponent(caseId)}`, { method: 'POST' }),
+  ownershipChange: (companyIds) =>
+    call('/api/demo/ownership-change', {
       method: 'POST',
-      body: JSON.stringify({ person_ids: personIds ?? null }),
+      body: JSON.stringify({ company_ids: companyIds ?? null }),
     }),
-  closeCase: (caseId) =>
-    call(`/api/investigation/close/${encodeURIComponent(caseId)}`, { method: 'POST' }),
-  caseDetail: (caseId) => call(`/api/investigation/case/${encodeURIComponent(caseId)}`),
-  // Chamada à parte, depois que o grafo desenhou: a agregação sobre transactions
-  // custa uma ida a mais ao cluster e não pode atrasar a expansão ao vivo.
-  exposure: (personIds) =>
-    call('/api/exposure', { method: 'POST', body: JSON.stringify({ person_ids: personIds }) }),
-  coaf: (caseId) => call(`/api/investigation/coaf/${encodeURIComponent(caseId)}`),
   reset: () => call('/api/demo/reset', { method: 'POST' }),
 }

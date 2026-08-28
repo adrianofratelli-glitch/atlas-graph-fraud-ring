@@ -1,51 +1,64 @@
-# ADR 0002 — 512d vectors, BinData float32, quantised index
+# ADR 0002 — 512 dimensions, quantised, on a collection of 32 documents
 
-**Status:** accepted · **Date:** 2026-08-26
+**Status:** accepted · **Date:** 2026-08-26 (rewritten 2026-08-28, when the vectors
+moved off `companies`)
 
 ## Context
 
-Every transaction needs a `reason_embedding` for the semantic similarity step.
-That is 600,000 transactions. The demo cluster is an **M20 (4 GB RAM, 150 GB
-disk)** shared with other applications, which already occupy about 60 GB.
+The concentration analysis asks whether N different activity codes are really N
+different businesses. That is a comparison of **meaning between activity
+descriptions**, and it needs embeddings.
 
-## The numbers that decided it
+The original decision was about capacity: every company needed a vector, that was
+1.2 million vectors, and the demo cluster is a shared **M20 (4 GB RAM)**. Vector
+search wants the HNSW graph resident in memory, and a 1.2 M × 1024-dimension
+float32 index does not fit next to everything else the cluster is doing.
 
-| Option | Vector on disk | Resident HNSW graph |
+## The decision that mattered more than any tuning
+
+**Put the vectors on `activities` — one document per distinct description — not on
+`companies`.**
+
+The base has **32 distinct activity descriptions** across 1.2 million companies.
+Embedding the field on every company and indexing that meant `$vectorSearch`
+walking 1.2 M documents, with `numCandidates: 10000`, to compare 32 texts:
+**29.3 seconds** per query. On the small collection the same answer is
+milliseconds.
+
+That reframes the capacity question entirely: the index is now 32 vectors, and it
+would fit on any tier. The dimension and quantisation choices below stopped being
+survival measures and became merely sensible.
+
+## Dimensions and quantisation
+
+| Option | Index size at 1.2 M vectors | At 32 vectors |
 |---|---|---|
-| 1024d, array of `double` | ~4.9 GB | ~2.4 GB |
-| 512d, array of `double` | ~2.4 GB | ~1.2 GB |
-| 512d, BinData `float32` | ~1.2 GB | ~1.2 GB |
-| **512d, BinData `float32`, `quantization: scalar`** | **~1.2 GB** | **~0.3 GB** |
+| 1024d float32 | ~4.9 GB — does not fit an M20 | negligible |
+| 512d float32 | ~2.5 GB — still uncomfortable | negligible |
+| **512d + scalar quantisation** | **~0.6 GB** | negligible |
 
-## Decision
+`voyage-3-lite` at `output_dimension: 512`, stored as BinData float32, with
+`quantization: "scalar"` on the index. Kept after the move because:
 
-`voyage-3-lite` at 512 dimensions, stored as `Binary.from_vector(...,
-BinaryVectorDtype.FLOAT32)`, with `quantization: "scalar"` in the index definition.
-
-On top of that, the embedder deduplicates: `reason_text` comes from a pool of
-templates, so `embed_reasons.py` embeds the **distinct texts** and propagates the
-vector with `update_many`. Every transaction ends up with a vector; Voyage is
-called a few dozen times instead of ~6,250.
+- it is what was measured, and the measurement is reproducible;
+- the recall loss on this task is nil — the pairs the panel needs to separate sit
+  at 0.89–1.00 similarity within a sector and well below 0.80 across sectors, and
+  scalar quantisation does not move a gap that wide;
+- if a customer's registry has free-text activity descriptions, the distinct set
+  is much larger than 32, and the sizing argument comes straight back.
 
 ## Consequence
 
-It fits on the shared cluster without hurting the other projects on it. Scalar
-quantisation costs recall, which is acceptable here because the demonstration is
-qualitative (two equivalent texts find each other), not a precision evaluation.
+Cost of embedding is proportional to **distinct texts**, not to rows: 32 calls to
+the Voyage API for the whole base. Say that out loud in the demo, and say the
+caveat with it — a real free-text registry deduplicates far less.
 
-**What to tell the customer:** the deduplication is honest, not a trick — on a real
-free-text dataset it would yield much less, and the cost is proportional to the
-number of distinct texts, not to the number of rows. Worth saying out loud in the
-demo.
+## Two operational notes
 
-## Two operational notes added later
+**Order.** `embed_activities.py` runs after the ownership base exists. Run it
+earlier and there are no descriptions to embed, so the panel comes back empty with
+no error to explain why.
 
-**Order in the pipeline.** `embed_reasons.py` has to run *after* the rings are
-injected. It used to run before, and the ring transactions were born without
-vectors — 11 of 137 vectorised in one ring — which made the semantic panel scoped
-to a network come back almost empty.
-
-**The backfill needs an index.** The propagation is one `update_many` per distinct
-text, filtering on `reason_embedding: {$exists: false}`. Without
-`{reason_text: 1, reason_embedding: 1}` that is 33 collection scans of 600,000
-documents, and the backfill takes tens of minutes.
+**Idempotence.** The script only embeds descriptions that are not in `activities`
+yet, so re-running after a data reload costs nothing and fills the gaps. `--force`
+re-embeds everything, which is what to use after changing model or dimension.

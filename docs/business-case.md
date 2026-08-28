@@ -11,91 +11,102 @@ arithmetic is ours and which half is the bank's.
 
 **We supply what is measured. The bank supplies what is assumed.**
 
-Everything in the screen's "What this case is worth" panel follows that split, and
-the panel says so on screen. That is not modesty — it is the same discipline that
-makes `queries/benchmarks.md` credible. A single invented number in this page
-would give an architect permission to doubt every measured one.
+Everything in the screen's "What this decision is worth" panel follows that split,
+and the panel says so on screen. That is not modesty — it is the same discipline
+that makes `queries/benchmarks.md` credible. A single invented number here would
+give an architect permission to doubt every measured one.
 
 We do **not** estimate loss avoided. Turning exposure into realised loss needs a
-conversion rate that varies by product, by institution and by fraud typology.
+default-rate assumption that varies by product, by institution and by segment.
 Guessing it would undo everything else.
 
 ## What the screen measures
 
-Flag a ring and open **What this case is worth**. Every number in the first block
-comes from `transactions` on the live cluster:
+Open a group and expand **What this decision is worth**. Every number in the first
+block comes from `credit_exposure` on the live cluster:
 
 | Measured | Where it comes from |
 |---|---|
-| volume that moved through the network | sum of `amount` over transactions touching the ring's accounts, both directions |
-| number of operations | count of those transactions |
-| accounts involved | `accounts` belonging to the flagged people |
-| observation window | span between the first and last of those transactions |
-| average ticket | mean `amount` |
+| consolidated limit of the group | sum of `limite` over every company the traversal reached |
+| drawn | sum of `utilizado` over the same set |
+| overdue | sum of `vencido` — the arrears that sit in a sibling, not in the applicant |
+| companies with credit | how many of the group's entities have exposure at all |
+| entities in the group | what the traversal reached, versus the one record the analyst started from |
 
-On the default dataset a 30-member ring typically shows on the order of **half a
-million reais across a few hundred operations in a six-month window**. Your run
-will differ — the panel shows what your cluster actually holds.
-
-That number is the answer to *"why should I care about these thirty accounts?"*
+The contrast is the argument: the applicant's own record shows a clean rating and
+a small limit; the group behind it carries an order of magnitude more, with the
+arrears in another branch. Both numbers come out of the same database, in one
+query.
 
 ## What the bank supplies
 
 Two inputs, in `.env`:
 
 ```bash
-ANALYST_HOURS_PER_CASE=4     # how long one investigation takes today
+ANALYST_HOURS_PER_CASE=4     # how long one group analysis takes today
 ANALYST_COST_PER_HOUR=120    # fully loaded cost of an analyst hour
 CURRENCY=R$
 ```
 
 Ask for both during discovery. If the customer does not know them, that is itself
-a finding worth raising — a fraud operation that cannot cost a case cannot measure
-its own efficiency.
+a finding worth raising — a credit desk that cannot cost an analysis cannot
+measure its own efficiency.
 
 The panel then does one piece of arithmetic, and only one:
 
-- **today**, a case is opened per account or per alert: `accounts × cost per case`;
-- **here**, one case covers the ring the traversal found: `1 × cost per case`.
+- **today**, mapping a group by hand means pulling records one CNPJ at a time:
+  `entities × cost per record`;
+- **here**, one query returns the group: `1 × cost per analysis`.
 
 That is not a projection. It is the customer's own number multiplied by a count
 the demo measured.
 
 ## The three arguments, in the order that lands
 
-**1. Exposure you cannot see today.** The ring moved *X* reais and none of its
-members would have been opened as one case. This is the number that gets attention,
+**1. Exposure you cannot see today.** The applicant is clean; the group is not. The
+consolidated figure does not exist in any single record, and no analyst assembles
+it reliably by hand under a decision SLA. This is the number that gets attention,
 and it is measured.
 
-**2. Case consolidation.** The traversal collapses N alerts into one investigation.
-Multiply by the bank's own cost per case. Frame it as analyst capacity released,
-not headcount removed — the second framing kills deals with fraud teams.
+**2. Visibility that cannot go stale.** The second scenario — manager sees the
+advisors below them, an advisor sees only their own book — is derived from the
+hierarchy at query time. The common alternative is a materialised list per user,
+which is wrong for as long as it takes to recompute after every book transfer.
+That is a control and audit argument, not a performance one, and it lands with
+risk and compliance rather than with engineering.
 
 **3. Operational surface avoided.** No second database to run, back up, monitor,
-secure and synchronise. `COMPETITIVE.md` carries the detail, including the four
-qualifying questions that decide whether this argument applies at all.
+secure and synchronise. And for the pattern this POV was built for, the customer's
+bottleneck is loading the base, not traversing it — `queries/benchmarks.md` has the
+load throughput measured, in the same document as the query latency.
+`COMPETITIVE.md` carries the qualifying questions that decide whether this
+argument applies at all.
 
 ## Where the argument stops
 
 Say these before anyone asks — the same rule as `LIMITATIONS.md`:
 
 - **We do not estimate loss avoided,** for the reason above.
-- **Detection quality is not benchmarked here.** The rings are injected ground
-  truth, so precision and recall on real data are unproven. This demonstrates the
-  investigation, not the detection model.
-- **The consolidation ratio depends on how the bank triages today.** If they already
-  group alerts by device, the gain is smaller. Ask.
+- **Group detection quality is not benchmarked.** The groups are generated ground
+  truth, so precision and recall against a real registry are unproven. This
+  demonstrates the query, not a data-quality pipeline over public CNPJ data.
+- **The consolidation gain depends on how the bank works today.** If they already
+  pull a consolidated group view from a data warehouse overnight, the gain is
+  freshness, not discovery. Ask which one they have.
 - **Cost of the platform is not in this page.** Cluster sizing is a separate
   conversation; the demo cluster is a shared M20 and proves nothing about
   production sizing.
 
 ## Discovery questions that make this page usable
 
-1. How many fraud alerts per month reach a human, and how many become cases?
-2. How long does one case take, end to end, and what is an analyst hour worth?
-3. Are alerts grouped today, or is it one case per account?
-4. What is the current exposure per confirmed mule network — do you measure it?
+1. How does a credit analyst assemble a group's consolidated exposure today, and
+   how long does it take?
+2. What is an analyst hour worth, fully loaded?
+3. Is the group view live, or produced by an overnight batch? What is the decision
+   SLA, and how often does the batch age past it?
+4. How is account visibility enforced today — a derived query or a materialised
+   list per user? What happens between a book transfer and the next recompute?
 5. What does the bank spend today on the systems this would replace or avoid?
 
-Questions 1 to 3 fill the panel. Questions 4 and 5 turn it into a business case
+Questions 1 and 2 fill the panel. Questions 3 to 5 turn it into a business case
 the customer owns rather than one we handed them.

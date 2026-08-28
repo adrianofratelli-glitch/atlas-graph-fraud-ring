@@ -5,8 +5,8 @@
 set -u
 
 BASE="$(cd "$(dirname "$0")" && pwd)"
-BACKEND_LOG="${TMPDIR:-/tmp}/atlas-graph-fraud-ring-backend.log"
-FRONTEND_LOG="${TMPDIR:-/tmp}/atlas-graph-fraud-ring-frontend.log"
+BACKEND_LOG="${TMPDIR:-/tmp}/atlas-graph-grupo-economico-backend.log"
+FRONTEND_LOG="${TMPDIR:-/tmp}/atlas-graph-grupo-economico-frontend.log"
 BACKEND_PORT=8350
 FRONTEND_PORT=5350
 
@@ -34,7 +34,7 @@ for port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
   fi
 done
 
-echo "🕸  Grafo de fraude · MongoDB Atlas"
+echo "🕸  Grupo econômico & risco de crédito · MongoDB Atlas"
 echo "=================================="
 
 echo "▶ backend (porta $BACKEND_PORT)..."

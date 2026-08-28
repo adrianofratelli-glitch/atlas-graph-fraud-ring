@@ -1,47 +1,52 @@
-// Índices obrigatórios. Rodar antes de qualquer query de grafo:
-//   mongosh "$MONGODB_URI" --eval 'db = db.getSiblingDB("graph_fraud_ring")' schema/indexes.js
+// Índices B-tree obrigatórios. Rodar antes de qualquer consulta de cadeia:
+//   mongosh "$MONGODB_URI" schema/indexes.js
 //
 // createIndex é idempotente: rodar de novo não duplica nem recria.
 
-const target = process.env.MONGODB_DB || "graph_fraud_ring";
+const target = process.env.MONGODB_DB || "graph_grupo_economico";
 db = db.getSiblingDB(target);
 print(`banco: ${target}`);
 
 const specs = [
-  // --- traversal (Padrão B, edges explícitas) ---
-  ["connections", { from: 1 }, {}, "connectFromField do $graphLookup"],
-  ["connections", { to: 1 }, {}, "connectToField do $graphLookup"],
-  ["connections", { type: 1, from: 1 }, {}, "suporte a restrictSearchWithMatch por tipo de aresta"],
+  // --- consulta pontual por chave de negócio: o caminho principal da demo ---
+  ["companies", { cnpj: 1 }, { unique: true }, "lookup por CNPJ"],
+  ["companies", { razao_social: 1 }, {}, "apoio à busca por nome"],
+  ["companies", { is_holding: 1 }, { sparse: true }, "seleção de casos na demo"],
+  ["companies", { credit_status: 1 }, { sparse: true }, "empresas sob revisão de crédito"],
+  ["companies", { case_id: 1 }, { sparse: true }, "empresas de um caso aberto"],
+  ["companies", { seed_index: 1 }, {}, "seleção determinística de casos"],
 
-  // --- traversal (Padrão A, atributo implícito) ---
-  ["transactions", { device_id: 1 }, {}, "traversal por dispositivo compartilhado"],
-  ["transactions", { from_account: 1 }, {}, "entrada do grafo + consulta operacional"],
-  ["transactions", { to_account: 1 }, {}, "entrada do grafo + consulta operacional"],
-  ["transactions", { timestamp: -1 }, {}, "extrato recente da conta"],
-  ["transactions", { ring_id: 1 }, { sparse: true }, "ground truth"],
-  ["transactions", { to_pix_key: 1 }, { sparse: true }, "materialização de same_pix_counterparty"],
-  // Sem ele, `POST /api/demo/reset` varre as 600 mil transações para achar as
-  // poucas simuladas e estoura o tempo — o reset falhava no meio da demo.
-  ["transactions", { simulated: 1 }, { sparse: true }, "reset da demo remove só as transações simuladas"],
-  // `embed_reasons.py` faz um `update_many` por texto distinto, filtrando por
-  // `reason_embedding: {$exists: false}`. Sem este índice são 33 COLLSCANs de
-  // 600 mil documentos, e o backfill leva dezenas de minutos.
-  ["transactions", { reason_text: 1, reason_embedding: 1 }, {}, "backfill de embeddings sem COLLSCAN"],
+  // --- traversal da cadeia societária ---
+  // A aresta é dirigida, e as duas direções usam campos opostos: subir a cadeia
+  // parte de `owned_id`, descer parte de `owner_id`. Faltando um dos dois, o
+  // `$graphLookup` daquele sentido cai em collection scan por nível do BFS.
+  ["ownership", { owner_id: 1 }, {}, "connectToField ao descer / connectFromField ao subir"],
+  ["ownership", { owned_id: 1 }, {}, "connectToField ao subir / connectFromField ao descer"],
+  // Não existe índice só em `owner_type`: três valores em 2,5 milhões de arestas
+  // não seleciona nada, e toda consulta que usa o campo já entra por `owner_id`
+  // ou `owned_id` e filtra depois.
+  ["ownership", { simulated: 1 }, { sparse: true }, "reset da demo remove só as arestas simuladas"],
 
-  // --- entidades ---
-  ["accounts", { person_id: 1 }, {}, "conta -> pessoa"],
-  ["accounts", { ring_id: 1 }, { sparse: true }, "validação de ground truth na demo"],
-  ["accounts", { status: 1 }, {}, "listar contas sob investigação"],
-  ["accounts", { case_id: 1 }, { sparse: true }, "contas de um caso aberto"],
-  // Único por conta, e é o DICT que exige isso: uma chave endereça uma conta só
-  // (Resolução BCB nº 1/2020). O índice único é a guarda contra o modelo errado
-  // voltar por descuido — se alguém tentar dar a mesma chave a duas contas, a
-  // escrita falha em vez de gerar uma aresta que não existe na vida real.
-  ["accounts", { pix_key: 1 }, { unique: true, sparse: true }, "chave PIX única por conta (DICT)"],
-  ["people", { ring_id: 1 }, { sparse: true }, "ground truth"],
-  ["people", { "addresses.address_id": 1 }, {}, "materialização de shares_address"],
+  // --- exposição de crédito ---
+  ["credit_exposure", { company_id: 1 }, { unique: true }, "exposição por empresa"],
+  ["credit_exposure", { advisor_id: 1 }, {}, "soma da carteira sem junção por documento"],
+  ["credit_exposure", { case_id: 1 }, { sparse: true }, "exposições de um caso aberto"],
+  ["credit_exposure", { vencido: -1 }, {}, "encontrar inadimplência relevante"],
 
-  ["people", { seed_index: 1 }, {}, "seleção determinística de casos na demo"],
+  // --- hierarquia comercial: árvore auto-referente ---
+  // `reports_to` é o connectToField do traversal que desce do gerente para os
+  // assessores. Sem ele o $graphLookup varre `advisors` por nível.
+  ["advisors", { reports_to: 1 }, {}, "connectToField ao descer a hierarquia"],
+  ["advisors", { papel: 1 }, {}, "seleção de gerente/assessor na demo"],
+  ["advisors", { matricula: 1 }, { unique: true }, "login por matrícula"],
+  ["companies", { advisor_id: 1 }, {}, "carteira de um assessor"],
+
+  // --- sócios pessoa física ---
+  // Só `seed_index`. Ocupação, renda e faixa etária são **projeção** no painel do
+  // nó, nunca filtro nem ordenação: índice sobre elas custa escrita e não paga
+  // leitura nenhuma. Vinham do modelo anterior desta POV, em que o atributo
+  // compartilhado era a própria aresta.
+  ["people", { seed_index: 1 }, {}, "seleção determinística"],
 ];
 
 for (const [coll, keys, opts, why] of specs) {
@@ -50,4 +55,4 @@ for (const [coll, keys, opts, why] of specs) {
 }
 
 print("\níndices B-tree prontos.");
-print("Atlas Search e Vector Search são criados por schema/search_indexes.py (não são índices de banco).");
+print("Atlas Search é criado por schema/search_indexes.py (não é índice de banco).");

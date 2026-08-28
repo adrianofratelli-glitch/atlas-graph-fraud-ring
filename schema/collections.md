@@ -1,215 +1,137 @@
 # Data modelling — `schema/collections.md`
 
+Two graphs live in this database, and they are modelled differently on purpose.
+The difference is the most useful thing in this document.
+
+| Graph | Relationship | Modelling | Traversal |
+|---|---|---|---|
+| **Ownership chain** — who owns whom | N:N, carries its own attributes (percentage, role, start date) | separate edge collection `ownership` | `$graphLookup` on `ownership`, both directions |
+| **Commercial hierarchy** — who reports to whom | functional: one person, at most one manager | self-referencing field `advisors.reports_to` | `$graphLookup` on `advisors`, one direction |
+
+An edge collection for the hierarchy would only add a join: there is no attribute
+to hang on the edge and no second parent to represent. A `parent_id` field on
+`companies` for ownership would be worse: it cannot hold a percentage, and it
+cannot express a company owned by three shareholders.
+
 ## Collections
 
-### `people`
-```json
-{
-  "_id": "deterministic uuid",
-  "name": "string",
-  "document_id": "synthetic national id, never real",
-  "phones": ["string"],
-  "addresses": [{ "street": "string", "city": "string", "zip": "string" }],
-  "risk_flags": ["string"],
-  "ring_id": "string | null",
-  "created_at": "date"
-}
-```
+### `companies`
 
-### `accounts`
-```json
-{
-  "_id": "deterministic uuid",
-  "person_id": "ref people._id",
-  "account_type": "checking | credit_card | savings",
-  "pix_key": "<unique per account — the DICT guarantees one key per account>",
-  "pix_key_type": "cpf | evp",
-  "opened_at": "date",
-  "status": "active | flagged | under_investigation",
-  "case_id": "string | null",
-  "ring_id": "string | null"
-}
-```
+The credit subject. One document per CNPJ.
 
-### `devices`
-```json
-{
-  "_id": "device_id (synthetic fingerprint)",
-  "device_type": "mobile | web",
-  "first_seen": "date"
-}
-```
-
-### `transactions`
-```json
-{
-  "_id": "deterministic uuid",
-  "from_account": "ref accounts._id",
-  "to_account": "ref accounts._id",
-  "to_pix_key": "destination PIX key — what same_pix_counterparty groups on",
-  "device_id": "ref devices._id",
-  "amount": "number",
-  "reason_text": "string (free text — used in the vector search demo)",
-  "reason_embedding": "BinData float32 (Voyage embedding)",
-  "timestamp": "date"
-}
-```
-
-### `connections` (explicit edge pattern)
-```json
-{
-  "_id": "deterministic uuid",
-  "from": "ref people._id",
-  "to": "ref people._id",
-  "type": "shares_device | shares_address | same_pix_counterparty",
-  "weight": "number (size of the group that produced the edge)",
-  "shared_key": "the attribute value that produced it",
-  "source": "batch | change_stream",
-  "created_at": "date"
-}
-```
-
-## Why the PIX edge is a destination, not a shared key
-
-The obvious modelling is wrong, and it is worth stating plainly because it is the
-first thing a bank architect will check.
-
-Brazil's DICT directory (BCB Resolution No. 1/2020) guarantees that **one PIX key
-addresses exactly one transactional account at a time**, and rejects duplicate
-registration. Two accounts holding the same key is not a rare state — it is a state
-the payment system prevents. A `shares_pix_key` edge would describe something that
-cannot happen.
-
-The real signal is the other side of the payment: **separate accounts paying
-repeatedly into the same destination key**. That is the collection account at the
-end of a mule funnel, and it is the pattern anti-money-laundering teams actually
-hunt. So `pix_key` lives on `accounts` with a `unique` index, `transactions`
-carries `to_pix_key`, and the edge is built by grouping on it.
-
-Two guards keep legitimate behaviour out: a payer must have paid the same key more
-than once (a single payment to a merchant is a purchase, not complicity), and a key
-receiving from more people than `HUB_FANOUT_THRESHOLD` is a hub — a merchant, a
-payment provider, a utility — and does not become an edge.
-
-## Two graph modelling patterns — when to use each
-
-### Pattern A — shared attribute as an implicit edge
-
-There is no `connections` collection for this kind of relationship. The "edge" is
-inferred at query time: two accounts that share the same `device_id` are implicitly
-connected.
-
-**When to use it:** when the relationship is already a natural attribute of the
-operational data (device, address, phone) and there is no business reason to keep
-it as an entity of its own. Advantage: zero duplication, zero synchronisation
-maintenance. Disadvantage: `$graphLookup` has to look up `devices`/`addresses` at
-every hop, which is more expensive than following an already materialised edge.
-
-Example query (see `queries/02_graphlookup_shared_attributes.js` for the full
-version):
-```javascript
-db.accounts.aggregate([
-  { $match: { _id: "suspect-account-id" } },
-  {
-    $graphLookup: {
-      from: "transactions",
-      startWith: "$_id",
-      connectFromField: "device_id",
-      connectToField: "device_id",
-      as: "network",
-      maxDepth: 4,
-      depthField: "hops"
-    }
-  }
-])
-```
-
-### Pattern B — explicit edges in `connections`
-
-The relationship is materialised as its own document, with weight and type. It is
-the pattern closest to a traditional graph database.
-
-**When to use it:** when the relationship itself carries relevant business metadata
-(weight, type, creation date, who declared it), or when traversing via an implicit
-attribute would be too expensive at high fan-out.
-
-```javascript
-db.people.aggregate([
-  { $match: { _id: "suspect-person-id" } },
-  {
-    $graphLookup: {
-      from: "connections",
-      startWith: "$_id",
-      connectFromField: "to",
-      connectToField: "from",
-      as: "network",
-      maxDepth: 4,
-      depthField: "hops",
-      restrictSearchWithMatch: { weight: { $lte: 50 } }
-    }
-  }
-])
-```
-
-**Recommendation:** use Pattern B (`connections`) for the core of the investigation
-(cheaper and more controllable via `restrictSearchWithMatch`), and Pattern A only
-as the source that *populates* `connections` — a job that materialises shared
-attributes as edges, with a minimum strength threshold, so that generic hubs do not
-become investigation edges.
-
-## Required indexes (see `schema/indexes.js` for the full script)
-
-| Collection | Index | Reason |
+| Field | Type | Note |
 |---|---|---|
-| `connections` | `{ from: 1 }` | `connectFromField` of `$graphLookup` |
-| `connections` | `{ to: 1 }` | `connectToField` of `$graphLookup` |
-| `connections` | `{ type: 1, from: 1 }` | filter by edge type |
-| `connections` | `{ from: 1, weight: 1 }` | pruning filter resolved in the index, not in FETCH |
-| `transactions` | `{ device_id: 1 }` | Pattern A traversal |
-| `transactions` | `{ from_account: 1 }`, `{ to_account: 1 }` | operational queries + graph entry |
-| `transactions` | `{ to_pix_key: 1 }` | materialisation of `same_pix_counterparty` |
-| `transactions` | `{ simulated: 1 }` | demo reset without a collection scan |
-| `transactions` | `{ reason_text: 1, reason_embedding: 1 }` | embedding backfill without a collection scan |
-| `accounts` | `{ pix_key: 1 }` unique | one key per account, as the DICT requires |
-| `accounts` | `{ ring_id: 1 }` | ground-truth validation in the demo |
-| `people` | Atlas Search index (`autocomplete` on `name`, `token` on `ring_id`) | fuzzy entity resolution, scoped by ring |
-| `transactions` | Vector Search index on `reason_embedding`, filter on `ring_id` | semantic similarity, scoped by ring |
+| `_id` | string | deterministic (`det_id`), never a random ObjectId |
+| `cnpj` | string | business key, **unique index** — the main query path |
+| `razao_social`, `uf`, `porte`, `situacao` | string | registry attributes |
+| `cnae`, `cnae_descricao`, `setor` | string | activity; `setor` is what makes a group look diversified by code and be concentrated in fact |
+| `is_holding` | bool | sparse index; picks demo cases |
+| `capital_social` | double | |
+| `advisor_id` | string | the advisor who covers this account — the link to the hierarchy graph |
+| `credit_status`, `case_id` | string | set by the transactional review, sparse |
+| `seed_index` | int | deterministic ordinal; how the generator addresses a company |
 
-## Who creates the `connections` indexes
+### `ownership` — the ownership edge
 
-Not `schema/indexes.js`, and the reason matters: `materialize_connections.py
---rebuild` calls `drop()` on the collection, and `drop()` takes the indexes with
-it. Creating the indexes in an earlier pipeline step means losing them silently —
-the traversal keeps working, just by collection scan at every BFS level.
+**Directed**: `owner_id` holds a stake in `owned_id`. The direction is the
+information, so the edge is *not* materialised both ways.
 
-That actually happened in this project and went unnoticed for a while, because
-nothing breaks. The indexes are now created at the end of the materialisation
-itself, and `run_all.sh` verifies they exist before declaring success.
+| Field | Type | Note |
+|---|---|---|
+| `owner_id` | string | a `people` id or a `companies` id |
+| `owner_type` | `individual` \| `corporate` | which collection `owner_id` points at |
+| `owned_id` | string | always a `companies` id |
+| `percentage` | double | |
+| `qualificacao` | string | `socio-administrador`, `presidente`, … |
 
-## Incremental maintenance
+Going **up** the chain (who owns me) connects `owned_id` and follows `owner_id`.
+Going **down** (whom do I own) connects `owner_id` and follows `owned_id`.
+Swapping the two silently returns the wrong set — no error, just a different
+answer. Both fields are indexed for that reason.
 
-The batch job is not the only write path into `connections`. The change stream in
-`backend/app/services/edge_maintenance.py` materialises the edge as soon as the
-transaction arrives, in about two seconds, preserving the same rules: `from_account`
-only, a hub above the threshold does not become an edge, and a deterministic `_id`
-in the same namespace as the generator — so an edge created live collides with the
-one the batch would create for the same pair, instead of duplicating it.
+### `people` — individual shareholders
 
-Edges from that source carry `source: "change_stream"`, which makes it possible to
-audit afterwards how much of the graph came from each path.
+800,000 of them, and the number is a modelling decision, not a volume choice.
+With 1.2 M companies and ~2.2 shareholders each, a population of 150,000 puts the
+same person in ~17 companies: "shared shareholder" stops being an exception and
+becomes a property of every pair of companies in the base. The generator draws
+from a long-tailed distribution — 85% of companies draw from the wide population,
+15% from a narrow 2% band that plays the recurring-shareholder role.
 
-Maintenance only reacts to `insert`, or to an `update` whose `updatedFields`
-touches `device_id`, `from_account` or `to_account`. Without that guard, any write
-on `transactions` reopens the materialisation — an embedding backfill fired
-thousands of edge writes with no device or account having changed.
+### `credit_exposure`
 
-## Resilience of the model
+One document per company that has credit with the bank (~32% of the base).
+`limite`, `utilizado`, `vencido`, `rating`. Unique index on `company_id`.
 
-- Every `_id` is deterministic (a hash of key attributes), not a random
-  `ObjectId` — that is what makes the data generator idempotent (running it twice
-  does not duplicate).
-- `ring_id` exists on `people`, `accounts` and `transactions` — it serves as
-  traceable *ground truth* to validate that the demo always finds the expected
-  network, regardless of generator randomness.
-- `accounts.pix_key` is unique. If someone tries to give two accounts the same key,
-  the write fails instead of producing an edge that does not exist in real life.
+The consolidated group figure is the sum over every entity the traversal reaches —
+that is the number a credit desk decides on, and it is not in any single record.
+
+### `advisors` — the commercial hierarchy
+
+Superintendent → regional → manager → advisor. `reports_to` points at the
+superior and is `null` at the top. Indexed, because it is the `connectToField` of
+the traversal that walks down the tree.
+
+Visibility is **derived** from this tree at query time, never materialised per
+user. A pre-computed list of visible accounts goes stale on every book transfer,
+and between the event and the recompute somebody sees what they should not.
+
+### `economic_groups`
+
+Ground truth for the showcase groups: holding, members, the applicant, the
+distressed sibling, the bridge shareholder and the cross-holdings. It exists so
+the demo can reach a good case without scanning the base live in front of the
+customer.
+
+### `activities`
+
+One document per **distinct** activity description — 32 of them — with the
+embedding of that text. The vector index lives here, not on `companies`.
+
+The first version embedded the field on all 1.2 M companies and indexed that: a
+`$vectorSearch` over 1.2 M documents to compare 32 texts, 29.3 seconds per query.
+The comparison is between activities, so the collection to index is the small one.
+Getting this wrong is the most common mistake in vector-search projects — indexing
+the row instead of the thing being compared — and the cost of it scales with the
+table, not with the problem.
+
+### `credit_decisions`, `ownership_alerts`
+
+Written by the transactional review and by the change-stream listener.
+
+## Required indexes
+
+`schema/indexes.js` is the full script and is idempotent. The ones the traversals
+cannot work without:
+
+| Collection | Index | Why |
+|---|---|---|
+| `companies` | `{cnpj: 1}` unique | the point lookup that starts every query |
+| `companies` | `{advisor_id: 1}` | an advisor's book |
+| `ownership` | `{owner_id: 1}` | connect field going down / follow field going up |
+| `ownership` | `{owned_id: 1}` | connect field going up / follow field going down |
+| `advisors` | `{reports_to: 1}` | connect field walking down the hierarchy |
+| `credit_exposure` | `{company_id: 1}` unique | hydration of the group's exposure |
+| `credit_exposure` | `{advisor_id: 1}` | the consolidated book, with no join per company |
+
+There is deliberately **no** compound index such as `{owned_id: 1, owner_type: 1}`.
+It would only pay off with `restrictSearchWithMatch` filtering on `owner_type`,
+and the traversal does not filter that way: cutting individual shareholders would
+cut exactly the shareholder who bridges two groups the registry treats as
+unrelated.
+
+## Why one round trip matters more than the traversal here
+
+The tree is shallow — most answers resolve in 2 to 4 hops, and `$graphLookup`
+spends single-digit milliseconds on it. The response time is therefore dominated
+by how many times the application talks to the cluster, not by graph work.
+
+`app/db/ownership.py` assembles the whole answer in **one** aggregation: it walks
+up, derives the group roots in the pipeline, walks down from all roots inside a
+correlated `$lookup`, and hydrates companies, shareholders and exposure with three
+more `$lookup` stages. The earlier version did the same work in up to ten serial
+calls, and measured ~4× slower against the same data for the same result.
+
+That is the shape of the argument this POV makes: for a shallow tree queried by
+business key, the engine is not the bottleneck — round trips and load throughput
+are.

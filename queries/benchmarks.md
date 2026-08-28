@@ -5,7 +5,7 @@
 > customer can reproduce it with one command.
 >
 > ```bash
-> .venv/bin/python queries/bench.py --runs 20
+> PYTHONPATH=backend .venv/bin/python queries/bench.py --runs 30
 > ```
 >
 > The first run of each scenario is discarded: it pays for WiredTiger cache
@@ -16,241 +16,172 @@
 | | |
 |---|---|
 | Cluster tier | M20 (4 GB RAM, 150 GB disk), shared with other applications |
-| Network latency to the cluster | **8.5 ms** average (p95 10.4 ms) |
-| Volume | 150,000 people · 239,912 accounts · 240,939 devices · 604,285 transactions · 118,720 connections |
-| Injected rings | 40 (20 to 30 members each) |
-| Timing measured | 2026-08-26 · node counts refreshed 2026-08-27 |
+| Network floor to the cluster | **8.2 ms** p50 |
+| Volume | 1,200,000 companies · 2,505,631 ownership edges · 800,000 individuals · 384,577 credit exposures · 969 advisors · 32 activities |
+| Showcase groups | 40, four levels, 25 companies each, with cross-holdings and a bridge shareholder |
+| Measured | 2026-08-28 |
 
-**Read the network latency before any other number.** Every time below already
-includes the ~8.5 ms network floor; what the benchmark measures is the
-**increment** over that floor, which is the part attributable to `$graphLookup`.
+**Read the network floor before any other number.** Every time below includes it;
+what the benchmark measures is the **increment** over the floor, which is the part
+attributable to the query.
 
-> Two earlier rounds were measured across slower network paths, with floors of
-> **256 ms** and **324 ms**. The floor dominated everything: a depth-3 expansion
-> showed up as "275 ms" when the real work was about 1 ms. Two conclusions from
-> those rounds were network artefacts and have been corrected — the main one being
-> that pruning made the query *slower*, which was noise. Worth keeping as a
-> reminder: measuring from the wrong side of the network measures the network.
+> This matters more than it sounds. During this round the network path to the
+> cluster changed mid-session and the floor went from 8 ms to **307 ms**. Every
+> scenario "got 25× slower" without a single line of code changing. Two earlier
+> rounds of this project were measured across floors of 256 ms and 324 ms and
+> produced two conclusions that were pure network artefact.
 >
-> If you re-run `bench.py` from a high-latency path, expect every row to shift by
-> the floor. Compare increments, not absolutes, and record the ping.
+> If you re-run from a high-latency path, expect every row to shift by the floor.
+> Compare increments, record the ping.
 
-## Index tuning for the pruned path
+## Load throughput — the number that matters first for this pattern
 
-`restrictSearchWithMatch: {weight: {$lte: N}}` is the UI default. With `{from: 1}`
-alone, that filter runs at the **FETCH** stage: the server fetches the document and
-only then discards it. Measured on a degree-400 node in the scale graph:
+For a shallow tree queried by business key, the customer's bottleneck is not the
+traversal. It is loading the base and operating it. `data-generator` writes
+`queries/load-results.json` on every clean load. Measured 2026-08-28:
 
-| Index | Returned | Keys examined | Docs examined |
+| Collection | Documents | Time | Rate |
 |---|---|---|---|
-| `{from: 1}` | 227 | 400 | **400** |
-| `{from: 1, weight: 1}` | 227 | 227 | **227** |
+| `companies` | 1,200,000 | 91.0 s | 13,189 docs/s |
+| `ownership` | 2,505,631 | 206.1 s | 12,155 docs/s |
+| `credit_exposure` | 384,577 | 20.1 s | 19,124 docs/s |
+| **total** | **4,090,208** | **317.2 s** | **12,893 docs/s — 46.4 M/hour** |
 
-Effect on time, same node:
+Measured with `insert_many` in unordered batches of 2,000, **from a workstation
+against a shared M20 over the public internet** — client network latency is
+included and dominates. A production load runs in the cluster's own region, on a
+tier sized for it, and is faster; present this as a floor observed under bad
+conditions, never as a ceiling.
 
-| | `{from: 1}` | `{from: 1, weight: 1}` | |
+The same base loaded at **3,633 docs/s** in an earlier round, on a worse network
+path — 3.5× slower with identical code and identical data. That is the third time
+in this project that the network, not the database, produced the headline number.
+Record the conditions or the number is noise.
+
+## Query latency
+
+### Ownership chain — the main demo path
+
+| Scenario | p50 | Over floor |
+|---|---|---|
+| economic group, depth 2 | 15.3 ms | **+7.1 ms** |
+| economic group, depth 3 | 15.0 ms | +6.8 ms |
+| economic group, depth 6 (cap) | 15.2 ms | +7.0 ms |
+| company with no group, depth 3 | 11.0 ms | +2.8 ms |
+
+Depth costs almost nothing here, and that is the point of the pattern: the tree is
+shallow, so the traversal saturates early and the extra levels find nobody new.
+
+### Commercial hierarchy — visibility scope
+
+| Scenario | Scope | p50 | Over floor |
 |---|---|---|---|
-| depth 1 | 81.0 ms | **58.9 ms** | **−27%** |
-| depth 2 | 3,311 ms | 3,461 ms | +5% (noise) |
+| advisor's own book | 1 advisor, 421 accounts with credit | 15.0 ms | +6.8 ms |
+| manager's book | 16 advisors, 6,317 accounts with credit | 52.8 ms | +44.6 ms |
+| visibility check on one account | — | 9.5 ms | +1.3 ms |
 
-**Honest reading:** the compound index helps the shallow, pruned traversal, which is
-what the screen does. At greater depth the cost is assembling the result, not
-fetching keys, and the index changes nothing. Cost: 26.4 MB on a 2.4 M edge
-collection, about 1%. Worth it, and it is not the difference between viable and
-unviable — that is pruning.
+The regional level (129 advisors, ~51,000 accounts with credit) answers in about
+**460 ms**. It is the honest ceiling of this shape: the traversal is still trivial,
+but the aggregation is summing tens of thousands of documents. Above that, the
+answer is a rollup, not a live query — say so before the customer finds it.
 
-Reproduce with: `.venv/bin/python tests/index_tuning.py`
+## Two optimisations, and what each was worth
 
-## A note on the first version of these numbers
+Both were found by measuring, and both are more instructive than the absolute
+numbers.
 
-Benchmarks published before 2026-08-26 were measured with `connections`
-**missing its traversal indexes**. `materialize_connections.py --rebuild` calls
-`drop()`, which takes the indexes with it, and the pipeline created them in an
-earlier step — so the BFS ran a COLLSCAN of 117,974 documents at every level.
-Nothing broke; it was just slow.
+### 1. Round trips, not traversal
 
-Effect of the fix at depth 3: **525 ms → 275 ms**. The indexes are now created by
-the materialisation itself, `run_all.sh` verifies they exist, and
-`tests/test_resilience.py` fails if the plan goes back to COLLSCAN.
+The first version of the economic-group query did the work in up to **ten serial
+calls**: the CNPJ lookup, the upward traversal, one downward traversal *per group
+root in a Python loop*, and three hydration finds.
 
-It is recorded here because a benchmark number that halved deserves an explanation,
-not a silent replacement.
+| | Round trips | p50 (8 ms floor) |
+|---|---|---|
+| serial version | up to 10 | 52 ms |
+| single aggregation | **1** | **13 ms** |
 
-## `$graphLookup` — Pattern B (explicit edges in `connections`)
+Same data, same result, 4× faster. On a shallow tree the traversal costs
+single-digit milliseconds, so the response time is decided by how many times the
+application talks to the cluster.
 
-| Depth | Mean (ms) | p95 (ms) | Nodes returned |
+### 2. Summing the right collection
+
+The advisor-book query started from `companies` in scope and `$lookup`-ed the
+exposure document by document.
+
+| | Regional (129 advisors) | Manager (16) | Advisor (1) |
 |---|---|---|---|
-| 1 | 9.2 | 11.0 | 7 |
-| 2 | 9.1 | 10.0 | 16 |
-| 3 | 9.5 | 10.4 | 31 |
-| 4 | 10.0 | 12.1 | 31 |
-| 5 | 11.0 | 13.1 | 31 |
+| join per company | 13,010 ms | 2,066 ms | 495 ms |
+| `advisor_id` denormalised onto `credit_exposure` | **462 ms** | **52 ms** | **16 ms** |
 
-Times are from the 8.5 ms floor run; node counts are from the current topology,
-where the destination-PIX-key edge links siblings within a branch.
+Only ~32% of companies have credit, and it is the exposure document that carries
+the number. Copying `advisor_id` onto it turns the query into an indexed `$match`
+plus a `$group`, with no per-document join. The denormalised field is derived, and
+the generator is its source of truth.
 
-## `$graphLookup` — Pattern A (implicit attribute via `device_id`)
+### 3. Indexing the thing being compared
 
-| Depth | Mean (ms) | p95 (ms) | Accounts reached |
-|---|---|---|---|
-| 1 | 9.4 | 11.7 | 2 |
-| 2 | 11.9 | 42.1 | 2 |
-| 3 | 10.9 | 29.2 | 2 |
+The concentration panel asks "how many distinct businesses hide behind these N
+activity codes?" The first version embedded `cnae_descricao` on all 1.2 M
+companies and ran `$vectorSearch` over that collection.
 
-Pattern A returns **transactions**, not people. Turning those into person nodes
-would require the `$lookup`s Pattern B already paid for once, in the materialisation
-job. Comparing the two times directly is unfair to Pattern B: it delivers more.
-
-## Which edge type holds the ring together
-
-Same entry point, same depth 3, toggling edge types in the UI:
-
-| Edges enabled | Nodes reached |
-|---|---|
-| all three | 31 |
-| without destination PIX key | 31 |
-| without address | 30 |
-| **without device** | **3** |
-
-Not a performance number — an investigative one. The device fingerprint is what
-holds this ring together; the other two are reinforcement. It is a hypothesis the
-analyst tests live, without writing a query.
-
-## Impact of `restrictSearchWithMatch` (hub pruning)
-
-| Scenario (depth 4) | Mean (ms) | Nodes returned |
+| | Documents searched | p50 |
 |---|---|---|
-| without `restrictSearchWithMatch` | 11.9 | 31 |
-| with weight pruning (`weight <= 50`) | 10.3 | 31 |
+| vector index on `companies.activity_embedding` | 1,200,000 | **29,346 ms** |
+| vector index on `activities.embedding` | **32** | **181 ms** (whole panel, including the group aggregation) |
 
-## ACID transaction — flagging the network for investigation
+There are only 32 distinct activity descriptions in the entire base. The
+comparison is between activities, not between the companies that mention them —
+so the collection to index was the small one. It also removed a 512-dimensional
+binary from 1.2 M documents.
 
-Measured through `POST /api/investigation/flag`, which is the same path the demo
-uses:
+This is worth telling a customer plainly, because it is the most common mistake in
+vector-search projects: indexing the row instead of indexing the thing compared.
 
-| Network size | Accounts updated | Time (ms) |
+### 4. Refusing early instead of queueing everything
+
+`tests/stress.py` mixes the five paths of the demo — mostly traversal, some
+search, little semantic analysis — and ramps concurrency to 64 against the same
+shared M20.
+
+The first run passed every correctness check and failed on latency:
+
+| Concurrency 64, before | p50 | p95 |
 |---|---|---|
-| 30 people | 44 | 42 warm, ~1,050 cold |
+| whole mix | 1,038 ms | **8,798 ms** |
+| ownership chain (the interactive path) | 879 ms | 2,042 ms |
+| advisor book | 854 ms | 8,833 ms |
+| concentration | 8,244 ms | 12,584 ms |
 
-`readConcern: snapshot`, `writeConcern: majority`, three writes in the same commit
-(`accounts`, `people`, `investigations`).
+No 5xx, no wrong answers — just a queue in which one heavy analytical query
+delayed the point lookup the screen depends on. The fix is a **bulkhead**
+(`app/services/limits.py`): four concurrent slots for the book, two for the
+concentration, and a **429 with `Retry-After`** for anything that cannot get a
+slot within 750 ms.
 
-## Change Streams — alert latency
-
-Measured by the listener itself (`lookup_ms` in the alert payload) and visible in
-the UI on every fire. The network check — the `find` on `accounts` that decides
-whether the transaction touches an open case — runs in the tens of milliseconds;
-the dominant time between insert and alert on screen is oplog propagation plus
-network RTT.
-
-## Scale — traversal over 2.4 million edges
-
-> Reproduce with: `.venv/bin/python tests/scale_graph.py --build --measure`
->
-> The injected fraud rings have 30 members and form closed components. They prove
-> the traversal **finds** the network; they prove nothing about cost, because the
-> BFS never does heavy work. This section answers "and at my volume?" with a
-> number.
-
-**Test graph:** preferential attachment over the same 150,000 people, **2,398,814
-directed edges**, long-tailed degree distribution capped at 400. Collection
-`connections_scale`, indexed on `from` and `to`.
-
-| Entry | Depth | Nodes reached | Edges | Time |
-|---|---|---|---|---|
-| degree 340 | 1 | 10,668 | 11,894 | **110 ms** |
-| degree 340 | 2 | — | — | ✗ **exceeds 100 MB after 38 s** |
-| degree 14 | 1 | 626 | 642 | 12.6 ms |
-| degree 14 | 2 | 21,278 | 25,809 | **254 ms** |
-| degree 14 | 3 | — | — | ✗ exceeds 100 MB after 180 s |
-| degree 12 | 1 | 363 | 376 | 11.8 ms |
-| degree 12 | 2 | 13,597 | 15,823 | **153 ms** |
-| degree 12 | 3 | — | — | ✗ exceeds 100 MB after 76 s |
-
-**Two hops are interactive even reaching 21,000 nodes** — 254 ms. Three hops do not
-exist without pruning: the traversal reaches most of the component and blows past
-the 100 MB output-document ceiling (`LIMITATIONS.md §5`), after grinding for 38 to
-180 seconds.
-
-### Pruning is what makes the query possible
-
-Same high-degree entry, same depth 1, with and without `restrictSearchWithMatch`:
-
-| | Nodes | Time |
+| Concurrency 64, after | p50 | p95 |
 |---|---|---|
-| without pruning | 10,668 | 104 ms |
-| **with pruning** (`weight <= 5`) | 3,620 | **45 ms** |
+| whole mix | 269 ms | **999 ms** |
+| ownership chain | 205 ms | **308 ms** |
+| advisor book | 934 ms | 1,422 ms |
+| concentration | 438 ms | 839 ms |
 
-And in an earlier measurement, with a degree-18 node at depth 3: **without pruning
-the traversal exceeded 100 MB after 40.7 s; with pruning, 33,872 nodes in
-1,044 ms.** From impossible to one second.
+Throughput went from **34 to 123 req/s**, with 615 requests refused as 429 across
+the run. That is the point, not a side effect: under saturation an honest system
+refuses early. Queueing everything turns a load spike into timeouts spread across
+paths that still had capacity.
 
-`restrictSearchWithMatch` prunes **during** the traversal, before the output array
-grows. A `$match` after `$graphLookup` would save nothing — the stage would already
-have blown up.
+### Concurrency, cheap version
 
-### What these numbers say, and what they do not
+`tests/test_resilience.py` also runs 40 concurrent expansions: **p50 31 ms, p95
+132 ms**, all 200s. That is a smoke test for contention, not a load test.
 
-**They say:** on a 2.4 M edge graph on a shared M20, traversal of 1 to 2 hops is
-interactive (12–254 ms) for any degree profile, and depth 3 requires pruning to
-exist at all. Fraud investigation is a 1 to 3 hop case, so this covers the use
-case.
+## What is not measured here
 
-**They say nothing** about billions of edges, a sharded graph (`LIMITATIONS.md §1`)
-or continuous algorithms (`§3`). And the 100 MB ceiling (`§5`) is structural: it
-does not go away with a larger tier.
-
-**What would change:** more RAM reduces the time of the cases that fit, but does not
-lift the ceiling. For components larger than that, the answer is to pre-compute
-subgraphs, not to buy a bigger machine.
-
-## Vector search with a selective filter
-
-Scoping the semantic panel to one ring uses `ring_id`, a filter field on the vector
-index. `$vectorSearch` walks the HNSW graph of the whole collection and applies the
-filter during the walk, so a very selective filter starves the search:
-
-| `numCandidates` | Distinct reasons returned from a 137-transaction ring |
-|---|---|
-| 360 | **1** |
-| 10,000 (server ceiling) | **8** |
-
-The data held nine distinct reasons. This is a design limit, not a tuning knob:
-`"numCandidates" must be within bounds [1..10000]`.
-
-## Honest conclusions
-
-**On the demo network, the traversal is essentially free.** Network floor 8.5 ms;
-depth 1 costs 9.2 ms and depth 5 costs 11.0 ms. The work attributable to
-`$graphLookup` runs from ~0.7 ms to ~2.5 ms. The curve is flat because the network
-saturates at the ring's members by depth 3.
-
-That proves the traversal finds the network at no perceptible cost, and **proves
-nothing about volume** — for that, see *Scale*.
-
-**Pruning helps, and an earlier measurement said otherwise because of the network.**
-With a 256 ms floor, "273 ms without pruning against 284 ms with" was noise read as
-signal. With an 8.5 ms floor: 11.9 ms without against 10.3 ms with, at depth 4. And
-on the scale graph the difference is of another order: 104 ms against 45 ms, or
-"impossible" against "one second" at depth 3.
-
-**The pruning that matters most is still the one at materialisation.**
-`materialize_connections.py --report-only` shows what it discards:
-
-| Hub type | Groups discarded | Reach |
-|---|---|---|
-| address | 3 | 8,618 people |
-| device | 5 | 35,251 accounts |
-
-Without that discard, those 8,618 people would be mutually connected one hop apart.
-
-**Pattern A and Pattern B are not comparable by the clock.** Both land around 10 ms
-because both are trivial at this scale; Pattern A reaches 2 accounts and Pattern B
-reaches 31 person nodes. The reason to prefer Pattern B for investigation is not
-speed: it is `restrictSearchWithMatch`, which only exists once the edge is
-materialised.
-
-**What can still be optimised:** the compound index `{from: 1, weight: 1}` (section
-above, −27% on the pruned path) is already applied. Beyond that, what remains is
-architecture, not tuning: on-demand expansion instead of the whole neighbourhood,
-and pre-computed subgraphs for components that do not fit under the 100 MB ceiling.
+- **Sharded traversal.** `$graphLookup` requires an unsharded `from` collection
+  (`LIMITATIONS.md §1`). Nothing here says anything about a sharded deployment.
+- **Concurrency.** These are single-client latencies. `tests/test_resilience.py`
+  runs a concurrent block, but this is not a load test.
+- **Cluster sizing.** A shared M20 proves the shape of the cost, not a production
+  capacity plan.
