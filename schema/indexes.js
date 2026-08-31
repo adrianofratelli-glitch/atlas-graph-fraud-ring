@@ -31,6 +31,7 @@ const specs = [
   ["credit_exposure", { company_id: 1 }, { unique: true }, "exposição por empresa"],
   ["credit_exposure", { advisor_id: 1 }, {}, "soma da carteira sem junção por documento"],
   ["credit_exposure", { case_id: 1 }, { sparse: true }, "exposições de um caso aberto"],
+  ["credit_exposure", { review_flag: 1 }, { sparse: true }, "fila de exposições sob revisão e reset da demo"],
   ["credit_exposure", { vencido: -1 }, {}, "encontrar inadimplência relevante"],
 
   // --- hierarquia comercial: árvore auto-referente ---

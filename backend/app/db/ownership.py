@@ -273,11 +273,12 @@ def economic_group(cnpj: str, depth: int | None = None) -> dict[str, Any]:
     s = get_settings()
     d = clamp_depth(depth)
     started = time.perf_counter()
+    pipeline = _pipeline_grupo(cnpj, d, s.max_nodes * 3, MAX_RAIZES)
 
     try:
         docs = with_retry(
             lambda: list(get_db().companies.aggregate(
-                _pipeline_grupo(cnpj, d, s.max_nodes * 3, MAX_RAIZES),
+                pipeline,
                 maxTimeMS=s.graph_max_time_ms,
             )),
             "grupo econômico",
@@ -419,5 +420,10 @@ def economic_group(cnpj: str, depth: int | None = None) -> dict[str, Any]:
             "pattern": "árvore rasa, consulta pontual por CNPJ",
             "roots": len(doc.get("raizes", [])),
             "max_depth": d,
+        },
+        "query_details": {
+            "operation": "aggregate",
+            "namespace": f"{s.db_name}.companies",
+            "pipeline": pipeline,
         },
     }

@@ -16,6 +16,30 @@ const EDGE_COLOR = {
 const DIM = 'rgba(136,147,151,0.16)'
 const DIM_TEXT = 'rgba(136,147,151,0.35)'
 
+const reduzMovimento = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+
+function edgeStyle(e, { active = false, dimmed = false, showLabel = active } = {}) {
+  const corporate = e.relType === 'corporate'
+  const color = EDGE_COLOR[e.relType] ?? t.borderSubtle
+  return {
+    color: dimmed
+      ? { color: DIM, opacity: 0.16 }
+      : { color, opacity: active ? 1 : 0.5 },
+    width: dimmed ? 1 : active ? (corporate ? 3.8 : 3.3) : corporate ? 1.8 : 1.5,
+    // No grupo aberto, dezenas de percentuais simultâneos viravam textura. O
+    // número reaparece quando a relação entra em contexto (hover, nó fixado ou
+    // apontamento vindo de um painel lateral).
+    label: showLabel ? e.percentageText : '',
+    font: {
+      size: 10,
+      color: t.textSec,
+      strokeWidth: 3,
+      strokeColor: t.bgSecondary,
+      align: 'middle',
+    },
+  }
+}
+
 function nodeStyle(n, { dimmed = false, emphasized = false, pinned = false } = {}) {
   // Empresa em revisão de crédito ganha borda tracejada: é o efeito da transação
   // ACID aparecendo no grafo. Sem isso, decidir não muda nada na tela.
@@ -84,6 +108,12 @@ export default function GraphCanvas({ data, pinned, onSelect, onHover, foraDoEsc
   const nodesDS = useRef(null)
   const edgesDS = useRef(null)
   const adjacency = useRef(new Map())
+  // A onda por saltos é a única animação de elementos do grafo. Qualquer
+  // interação do usuário a interrompe: investigação sempre vence apresentação.
+  const sweepTimers = useRef([])
+  const sweepActive = useRef(false)
+  const cancelSweepRef = useRef(null)
+  const lastSweepKey = useRef(null)
   // Handle do requestAnimationFrame da reacomodação pós-arraste.
   const animacao = useRef(0)
   // `pinned` vive num ref, não nas dependências do efeito: mudá-lo só repinta os
@@ -112,16 +142,19 @@ export default function GraphCanvas({ data, pinned, onSelect, onHover, foraDoEsc
 
   useEffect(() => {
     pinnedRef.current = pinned
+    cancelSweepRef.current?.()
     restoreRef.current?.()
   }, [pinned])
 
   useEffect(() => {
     escopoRef.current = foraDoEscopo
+    cancelSweepRef.current?.()
     restoreRef.current?.()
   }, [foraDoEscopo])
 
   useEffect(() => {
     destaqueRef.current = destaque
+    cancelSweepRef.current?.()
     restoreRef.current?.()
     // Enquadra o que foi destacado. Um destaque fora da área visível não destaca
     // nada — e num grupo de 25 empresas o nó procurado costuma estar justamente
@@ -143,7 +176,7 @@ export default function GraphCanvas({ data, pinned, onSelect, onHover, foraDoEsc
     rede.moveTo({
       position: centro,
       scale: Math.min(Math.max(escalaAtual, 0.55), 0.9),
-      animation: { duration: 500, easingFunction: 'easeInOutQuad' },
+      animation: reduzMovimento() ? false : { duration: 500, easingFunction: 'easeInOutQuad' },
     })
   }, [destaque])
 
@@ -165,13 +198,15 @@ export default function GraphCanvas({ data, pinned, onSelect, onHover, foraDoEsc
         }),
       }))
     )
-    edgesDS.current.update(
-      edgesDS.current.get().map((e) => ({
-        id: e.id,
-        color: { color: EDGE_COLOR[e.relType] ?? t.borderSubtle, opacity: 0.75 },
-        width: e.relType === 'corporate' ? 3 : 2.4,
-      }))
-    )
+    const apontados = destaqueRef.current
+    edgesDS.current.update(edgesDS.current.get().map((e) => {
+      const touchesPinned = Boolean(
+        pinnedRef.current && (e.from === pinnedRef.current || e.to === pinnedRef.current)
+      )
+      const withinHighlight = Boolean(apontados?.has(e.from) && apontados?.has(e.to))
+      const active = touchesPinned || withinHighlight
+      return { id: e.id, ...edgeStyle(e, { active, dimmed: Boolean(apontados && !active) }) }
+    }))
   }, [data])
 
   restoreRef.current = restore
@@ -196,13 +231,7 @@ export default function GraphCanvas({ data, pinned, onSelect, onHover, foraDoEsc
       edgesDS.current.update(
         edgesDS.current.get().map((e) => {
           const touches = e.from === nodeId || e.to === nodeId
-          return {
-            id: e.id,
-            color: touches
-              ? { color: EDGE_COLOR[e.relType] ?? t.borderSubtle, opacity: 1 }
-              : { color: DIM, opacity: 0.25 },
-            width: touches ? 4.5 : 1.6,
-          }
+          return { id: e.id, ...edgeStyle(e, { active: touches, dimmed: !touches }) }
         })
       )
     },
@@ -232,6 +261,17 @@ export default function GraphCanvas({ data, pinned, onSelect, onHover, foraDoEsc
     // o `fit` respondia reduzindo o zoom até os rótulos ficarem ilegíveis.
     const raioDe = (n) => (n.kind === 'person' ? 18 : Math.min(68, 26 + curto(n.label).length * 1.7))
 
+    const reduceMotion = reduzMovimento()
+    const sujeito = (data?.nodes ?? []).find((n) => n.is_subject)?.id
+    const sweepKey = sujeito ? `${sujeito}:${data?.depth ?? ''}` : null
+    const animateSweep = Boolean(
+      sweepKey &&
+      sweepKey !== lastSweepKey.current &&
+      !reduceMotion &&
+      !escopoRef.current?.size &&
+      !destaqueRef.current?.size &&
+      (data?.nodes?.length ?? 0) > 1
+    )
     const nodes = new DataSet(
       (data?.nodes ?? []).map((n) => ({
         id: n.id,
@@ -249,10 +289,13 @@ export default function GraphCanvas({ data, pinned, onSelect, onHover, foraDoEsc
           : false,
         ...nodeStyle(n, {
           pinned: n.id === pinnedRef.current,
-          emphasized: destaqueRef.current?.has(n.id) ?? false,
+          emphasized: animateSweep ? n.id === sujeito : destaqueRef.current?.has(n.id) ?? false,
           dimmed:
-            (escopoRef.current?.has(n.id) ?? false) ||
-            (destaqueRef.current ? !destaqueRef.current.has(n.id) : false),
+            (animateSweep && n.id !== sujeito) ||
+            (!animateSweep && (
+              (escopoRef.current?.has(n.id) ?? false) ||
+              (destaqueRef.current ? !destaqueRef.current.has(n.id) : false)
+            )),
         }),
       }))
     )
@@ -267,10 +310,11 @@ export default function GraphCanvas({ data, pinned, onSelect, onHover, foraDoEsc
         // A seta importa: participação é dirigida, e é a direção que diz quem
         // controla quem.
         arrows: { to: { enabled: true, scaleFactor: 0.55 } },
-        label: e.percentage != null ? `${e.percentage}%` : undefined,
-        font: { size: 10, color: t.textMuted, strokeWidth: 0, align: 'middle' },
-        color: { color: EDGE_COLOR[e.type] ?? t.borderSubtle, opacity: 0.75 },
-        width: e.type === 'corporate' ? 3 : 2.4,
+        percentageText: e.percentage != null ? `${e.percentage}%` : '',
+        ...edgeStyle(
+          { relType: e.type, percentageText: e.percentage != null ? `${e.percentage}%` : '' },
+          { dimmed: animateSweep, showLabel: false }
+        ),
       }))
     )
 
@@ -285,7 +329,6 @@ export default function GraphCanvas({ data, pinned, onSelect, onHover, foraDoEsc
     nodesDS.current = nodes
     edgesDS.current = edges
 
-    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
     setSettling(!reduceMotion)
     const network = new Network(
       holder.current,
@@ -335,19 +378,109 @@ export default function GraphCanvas({ data, pinned, onSelect, onHover, foraDoEsc
       }
     )
 
+    let postFitTimer = 0
+    let sweepCancelled = false
+    const clearSweepTimers = () => {
+      for (const timer of sweepTimers.current) window.clearTimeout(timer)
+      sweepTimers.current = []
+    }
+    const cancelSweep = () => {
+      if (sweepCancelled) return
+      sweepCancelled = true
+      clearSweepTimers()
+      sweepActive.current = false
+      // Se a onda for interrompida por hover, zoom ou arraste, não deixe o
+      // grafo pela metade — inclusive nos 500 ms de enquadramento que antecedem
+      // o primeiro salto. A interação seguinte parte sempre do estado legível.
+      if (animateSweep) restoreRef.current?.()
+    }
+    cancelSweepRef.current = cancelSweep
+
+    // Distância topológica a partir do solicitante, não trace interno do
+    // `$graphLookup`: os nós ficam imóveis e uma onda curta devolve cor a cada
+    // salto. É movimento que explica o domínio, não movimento ambiente.
+    const startSweep = () => {
+      if (!animateSweep || !sujeito || sweepCancelled) return
+
+      const hops = new Map([[sujeito, 0]])
+      const fila = [sujeito]
+      for (let i = 0; i < fila.length; i++) {
+        const atual = fila[i]
+        const proximo = (hops.get(atual) ?? 0) + 1
+        for (const vizinho of adj.get(atual) ?? []) {
+          if (hops.has(vizinho)) continue
+          hops.set(vizinho, proximo)
+          fila.push(vizinho)
+        }
+      }
+
+      const maxHop = Math.max(0, ...hops.values())
+      const stepMs = Math.max(85, Math.min(125, Math.floor(520 / Math.max(1, maxHop))))
+      sweepActive.current = true
+
+      for (let hop = 1; hop <= maxHop; hop++) {
+        const timer = window.setTimeout(() => {
+          if (!sweepActive.current) return
+          nodes.update((data?.nodes ?? []).map((n) => {
+            const nivel = hops.get(n.id) ?? Number.POSITIVE_INFINITY
+            return {
+              id: n.id,
+              ...nodeStyle(n, {
+                pinned: n.id === pinnedRef.current,
+                emphasized: nivel === hop,
+                dimmed: nivel > hop,
+              }),
+            }
+          }))
+          edges.update(edges.get().map((e) => {
+            const nivel = Math.max(
+              hops.get(e.from) ?? Number.POSITIVE_INFINITY,
+              hops.get(e.to) ?? Number.POSITIVE_INFINITY
+            )
+            return {
+              id: e.id,
+              ...edgeStyle(e, {
+                active: nivel === hop,
+                dimmed: nivel > hop,
+                showLabel: false,
+              }),
+            }
+          }))
+        }, hop * stepMs)
+        sweepTimers.current.push(timer)
+      }
+
+      const done = window.setTimeout(() => {
+        sweepActive.current = false
+        sweepTimers.current = []
+        restoreRef.current?.()
+      }, (maxHop + 1) * stepMs)
+      sweepTimers.current.push(done)
+    }
+
     network.once('afterDrawing', () => {
-      network.fit({ animation: { duration: 420, easingFunction: 'easeInOutQuad' } })
+      // Registrar a reprodução só depois do primeiro desenho evita que o ciclo
+      // extra de montagem do React StrictMode consuma a animação antes de ela
+      // chegar à tela. Mesmo quando dispensada, ela continua sendo one-shot para
+      // esta combinação de solicitante e profundidade.
+      if (sweepKey) lastSweepKey.current = sweepKey
+      network.fit({
+        animation: reduceMotion ? false : { duration: 420, easingFunction: 'easeInOutQuad' },
+      })
       setSettling(false)
       // Segundo `fit` depois que a animação termina: o primeiro roda com a caixa
       // delimitadora ainda do layout anterior e deixa o grafo pequeno no centro
-      // de um canvas vazio.
-      window.setTimeout(() => {
-        const sujeito = (data?.nodes ?? []).find((n) => n.is_subject)?.id
+      // de um canvas vazio. A onda só começa depois deste enquadramento final;
+      // combinar zoom da câmera e revelação dos saltos faria os nós parecerem
+      // móveis, mesmo com suas coordenadas estáveis.
+      postFitTimer = window.setTimeout(() => {
         desencostarNivel(sujeito)
         network.fit({ animation: false })
+        startSweep()
       }, 500)
     })
     network.on('hoverNode', (p) => {
+      cancelSweep()
       focus(p.node)
       onHover?.(p.node)
     })
@@ -355,7 +488,10 @@ export default function GraphCanvas({ data, pinned, onSelect, onHover, foraDoEsc
       restore()
       onHover?.(null)
     })
-    network.on('selectNode', (p) => onSelect?.(p.nodes[0]))
+    network.on('selectNode', (p) => {
+      cancelSweep()
+      onSelect?.(p.nodes[0])
+    })
     network.on('deselectNode', () => onSelect?.(null))
 
     // ## Arrastar move **só** o que foi arrastado
@@ -511,7 +647,9 @@ export default function GraphCanvas({ data, pinned, onSelect, onHover, foraDoEsc
       network.storePositions()
     }
 
+    network.on('dragStart', cancelSweep)
     network.on('dragEnd', (p) => {
+      cancelSweep()
       const solto = p.nodes?.[0]
       if (solto) desencostar(solto)
     })
@@ -519,6 +657,7 @@ export default function GraphCanvas({ data, pinned, onSelect, onHover, foraDoEsc
     // O vis nem sempre emite `blurNode` quando o ponteiro sai do canvas de uma
     // vez — e o grafo ficava atenuado para sempre. O DOM sabe disso melhor.
     const leave = () => {
+      cancelSweep()
       restore()
       onHover?.(null)
     }
@@ -526,13 +665,22 @@ export default function GraphCanvas({ data, pinned, onSelect, onHover, foraDoEsc
     const holderEl = holder.current
 
     // Gancho de teste. A rede vive dentro do componente e o canvas não expõe
-    // nós no DOM, então sem isto não há como um teste automatizado afirmar
-    // "só o nó arrastado saiu do lugar" — que é justamente a garantia desta
-    // tela. Só leitura de posição; não muda o comportamento da aplicação.
+    // nós ou arestas no DOM, então sem isto não há como um teste automatizado
+    // afirmar que o layout ficou imóvel ou que labels só apareceram em contexto.
     window.__grafo = {
       posicoes: () => network.getPositions(),
       paraTela: (p) => network.canvasToDOM(p),
+      animando: () => sweepActive.current,
+      arestas: () => edges.get().map((e) => ({
+        id: e.id,
+        from: e.from,
+        to: e.to,
+        label: e.label,
+        width: e.width,
+        color: e.color,
+      })),
       arrastar: (id, dx, dy) => {
+        cancelSweep()
         const p = network.getPositions([id])[id]
         network.moveNode(id, p.x + dx, p.y + dy)
         desencostar(id)
@@ -541,6 +689,10 @@ export default function GraphCanvas({ data, pinned, onSelect, onHover, foraDoEsc
 
     net.current = network
     return () => {
+      clearSweepTimers()
+      sweepActive.current = false
+      cancelSweepRef.current = null
+      window.clearTimeout(postFitTimer)
       cancelAnimationFrame(animacao.current)
       holderEl?.removeEventListener('mouseleave', leave)
       network.destroy()
@@ -548,11 +700,20 @@ export default function GraphCanvas({ data, pinned, onSelect, onHover, foraDoEsc
     }
   }, [data, unique, focus, restore, onHover, onSelect])
 
-  const fit = () => net.current?.fit({ animation: { duration: 420, easingFunction: 'easeInOutQuad' } })
+  const fit = () => {
+    cancelSweepRef.current?.()
+    net.current?.fit({
+      animation: reduzMovimento() ? false : { duration: 420, easingFunction: 'easeInOutQuad' },
+    })
+  }
   const zoom = (factor) => {
+    cancelSweepRef.current?.()
     const n = net.current
     if (!n) return
-    n.moveTo({ scale: n.getScale() * factor, animation: { duration: 220, easingFunction: 'easeInOutQuad' } })
+    n.moveTo({
+      scale: n.getScale() * factor,
+      animation: reduzMovimento() ? false : { duration: 220, easingFunction: 'easeInOutQuad' },
+    })
   }
 
   return (
