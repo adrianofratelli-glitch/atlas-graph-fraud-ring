@@ -21,7 +21,8 @@ It deliberately does **not** try to prove MongoDB replaces a graph database for 
 other shape: a dense network explored ad-hoc, with graph algorithms running
 continuously. There the structural advantages of a native graph engine —
 index-free adjacency, embedded algorithms — are real, and the honest answer is
-co-existence. `COMPETITIVE.md` opens with the table that separates the two.
+co-existence. The table under "Why this shape of graph, and not another" in
+`README.md` is the filter that separates the two.
 
 Everything below is a limitation *within* the scope this project did choose.
 
@@ -180,7 +181,7 @@ pruning and costs one second with it.
 the ownership chain is shallow and closed, the largest showcase group returns 25
 companies, and the traversal never comes close to the ceiling. The limitation is
 real and it is simply not the regime this POV operates in — which is exactly the
-distinction `COMPETITIVE.md` opens with.
+distinction the qualification table in `README.md` draws.
 
 And look at the time **before** the failure — 38 to 180 seconds. The stage does not
 fail fast: it traverses, accumulates, and only discovers it does not fit once the
@@ -233,8 +234,8 @@ graph, because the search never does heavy work.
 The difference from the usual version of this objection is that the shallowness is
 not a shortcut — it is the **hypothesis**. This POV claims that a large class of
 enterprise graph problems is shallow and point-queried, and that for those the
-right question is load throughput and operational cost, not traversal speed.
-`COMPETITIVE.md` opens with the table that decides whether a given customer is in
+right question is load throughput and operational cost, not traversal speed. The
+qualification table in `README.md` is what decides whether a given customer is in
 that class.
 
 So the answer to "your graph is small" is not a bigger graph. It is: *is your real

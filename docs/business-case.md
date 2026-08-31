@@ -78,9 +78,8 @@ risk and compliance rather than with engineering.
 **3. Operational surface avoided.** No second database to run, back up, monitor,
 secure and synchronise. And for the pattern this POV was built for, the customer's
 bottleneck is loading the base, not traversing it — `queries/benchmarks.md` has the
-load throughput measured, in the same document as the query latency.
-`COMPETITIVE.md` carries the qualifying questions that decide whether this
-argument applies at all.
+load throughput measured, in the same document as the query latency. The
+qualification table in `README.md` decides whether this argument applies at all.
 
 ## Where the argument stops
 

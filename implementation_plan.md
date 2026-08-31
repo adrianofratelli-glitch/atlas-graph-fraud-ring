@@ -24,9 +24,10 @@ dedicated engine has a real structural advantage and the honest answer is
 co-existence.
 
 That is in `LIMITATIONS.md` (which now opens with the scope decision itself) and in
-the table at the top of `COMPETITIVE.md`. Both are required reading before any
-presentation — the credibility of the conversation depends on raising those limits
-before the customer's architect does.
+the qualification table under "Why this shape of graph, and not another" in
+`README.md`. Both are required reading before any presentation — the credibility of
+the conversation depends on raising those limits before the customer's architect
+does.
 
 ## Briefing index
 
@@ -42,7 +43,6 @@ Positioning documents, outside the build briefing:
 |---|---|
 | [`README.md`](README.md) | public cover of the repository |
 | [`LIMITATIONS.md`](LIMITATIONS.md) | where the thesis **does not** apply |
-| [`COMPETITIVE.md`](COMPETITIVE.md) | MongoDB × Neo4j × Neptune, and the qualifying questions |
 | [`queries/benchmarks.md`](queries/benchmarks.md) | numbers measured on this cluster, not estimated |
 | [`docs/demo-script.md`](docs/demo-script.md) | 15-minute script and pre-demo checklist |
 | [`docs/business-case.md`](docs/business-case.md) | turning the demo into a number, and what we refuse to estimate |

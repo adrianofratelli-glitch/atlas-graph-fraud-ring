@@ -4,10 +4,10 @@
 
 "Dado este CNPJ, qual é o grupo econômico dele e quanto o grupo já deve para o
 banco?" É uma consulta **pontual, por chave de negócio, sobre uma árvore rasa** —
-não exploração analítica de um grafo denso. A distinção importa e está em
-`COMPETITIVE.md`: é neste padrão que `$graphLookup` ganha de um banco de grafo
-dedicado, porque o gargalo do cliente não é o algoritmo, é carregar o volume e
-operar a infraestrutura.
+não exploração analítica de um grafo denso. A distinção importa e a tabela de
+critério está no `README.md`: é neste padrão que `$graphLookup` ganha de um banco
+de grafo dedicado, porque o gargalo do cliente não é o algoritmo, é carregar o
+volume e operar a infraestrutura.
 
 ## Direção da aresta, que é o detalhe que mais confunde
 

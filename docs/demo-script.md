@@ -113,8 +113,8 @@ Say it plainly, and say the limit out loud with it:
 - Both answers came from the database the data already lives in. No second engine,
   no synchronisation pipeline, no second backup and DR surface.
 - The tree is shallow and the question is a point lookup by business key. That is
-  the pattern where this wins — `COMPETITIVE.md` opens with the table that says
-  when it does not.
+  the pattern where this wins — the qualification table in `README.md` says when
+  it does not.
 - The cost that matters here is not the traversal: it is loading the base and
   operating it. `queries/benchmarks.md` has both numbers, measured, with the
   command that reproduces them.

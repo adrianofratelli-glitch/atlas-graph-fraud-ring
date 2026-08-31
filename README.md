@@ -32,8 +32,10 @@ asks why not Neo4j:
 | Depth in practice | discovered by exploring | 2 to 4 hops answers most questions |
 
 Both scenarios here live in the right-hand column. For the left-hand column the
-honest answer is co-existence, and [COMPETITIVE.md](COMPETITIVE.md) says so before
-it says anything else.
+honest answer is co-existence, not displacement — a dense network explored ad-hoc,
+with graph algorithms running continuously, is a shape where index-free adjacency
+and embedded algorithms are a real structural advantage. Say that out loud before
+anything else; the qualification is what makes the rest credible.
 
 ## Two graphs, modelled differently on purpose
 

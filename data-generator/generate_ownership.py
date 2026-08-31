@@ -9,7 +9,8 @@ e quanto o grupo já deve para nós?", responde em poucos saltos, e faz isso alg
 milhares de vezes por dia sobre uma base de dezenas de milhões de registros.
 
 Esse padrão importa porque é onde o gargalo do cliente **não** é o algoritmo de
-grafo: é carregar o volume e operar a infraestrutura. Ver `COMPETITIVE.md`.
+grafo: é carregar o volume e operar a infraestrutura. A tabela de critério está
+no `README.md`.
 
 ## Topologia, e por que ela é assim
 
