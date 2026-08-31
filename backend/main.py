@@ -58,10 +58,6 @@ class ReviewIn(BaseModel):
     group_exposure: dict | None = None
 
 
-class SimulateIn(BaseModel):
-    company_ids: list[str] | None = Field(default=None, max_length=5000)
-
-
 class ConcentrationIn(BaseModel):
     company_ids: list[str] = Field(min_length=1, max_length=2000)
 
@@ -346,15 +342,6 @@ def reset():
     out = credit_decision.reset_all()
     credit_demo.invalidate_cache()
     return out
-
-
-@app.post("/api/demo/ownership-change")
-def ownership_change(payload: SimulateIn = SimulateIn()):
-    """Alteração contratual ao vivo: o grupo muda depois da decisão."""
-    result = credit_demo.simulate_ownership_change(payload.company_ids)
-    if not result.get("ok"):
-        raise HTTPException(409, result.get("error"))
-    return result
 
 
 # --------------------------------------------------------------------------- tempo real

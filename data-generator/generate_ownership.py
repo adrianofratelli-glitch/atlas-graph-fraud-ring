@@ -309,21 +309,42 @@ def gen_ownership(
             )
 
 
+# Profundidades societárias distintas cobertas pelos grupos de vitrine. Tem que
+# bater com `GRAPH_MAX_DEPTH_CAP` no backend: o slider da tela vai de 1 a 6, e
+# cada posição precisa de um grupo em que ela seja o fundo exato da árvore.
+GRUPO_PROFUNDIDADES = 6
+
+
+def larguras_por_nivel(profundidade: int) -> list[int]:
+    """Quantas empresas em cada nível abaixo da holding.
+
+    Cresce com o nível para a árvore parecer conglomerado, e é calibrada para o
+    grupo raso não sair magro demais na tela: profundidade 1 abre com 6
+    controladas diretas, profundidade 6 termina com 38 empresas no total.
+    """
+    largura_base = max(2, 7 - profundidade)
+    return [largura_base + 2 * n for n in range(profundidade)]
+
+
 def monta_topologia(rng: random.Random, n: int, n_grupos: int, max_chain: int, n_vitrine: int):
     """Sorteia grupos econômicos, a cadeia longa e os casos de vitrine.
 
-    ## Por que os grupos de vitrine têm quatro níveis
+    ## Por que cada grupo de vitrine tem uma profundidade diferente
 
     A versão anterior criava grupos rasos — holding e subsidiárias, um nível só —
     e isso quebrava o controle de profundidade da tela: nível 1 e nível 6
     devolviam exatamente as mesmas empresas, porque não havia o que revelar. O
     apresentador clicava e nada mudava.
 
-    Com quatro níveis (holding → duas sub-holdings → controladas → operacionais)
-    e o solicitante **na base**, subir a cadeia passa a ser progressivo: no nível
-    1 ele vê só quem o controla diretamente, e o grupo inteiro só aparece no 3.
-    É a mesma revelação por profundidade que sustentava a versão anterior desta
-    POV, aplicada a uma árvore societária.
+    Com todos os grupos em quatro níveis o problema voltou pela outra ponta: a
+    partir do nível 3 a árvore acabava, e subir para 5 ou 6 devolvia exatamente as
+    mesmas empresas. O slider mexia e a tela não.
+
+    Agora cada grupo de vitrine tem uma profundidade própria, de 1 a
+    `GRUPO_PROFUNDIDADES`, e o solicitante fica **na base**: no nível 1 ele vê só
+    quem o controla diretamente, e o grupo inteiro só aparece quando a
+    profundidade escolhida alcança a do grupo. Os grupos não compartilham
+    empresa nenhuma — `reserva()` só entrega id ainda não usado.
 
     ## Setor por grupo
 
@@ -345,49 +366,73 @@ def monta_topologia(rng: random.Random, n: int, n_grupos: int, max_chain: int, n
         cursor -= k
         return out
 
-    # --- grupos de vitrine: quatro níveis, setor único ---
+    # --- grupos de vitrine: um por profundidade, setor único ---
     #
-    # 25 empresas por grupo (1 + 3 + 9 + 12), não 11. Com 11 o grafo na tela era
-    # uma árvore magra que não parecia um conglomerado — e o argumento da POV é
-    # justamente que o analista não enxerga o grupo inteiro sozinho.
+    # Cada grupo de vitrine tem uma profundidade societária **própria**, de 1 a
+    # `GRUPO_PROFUNDIDADES`, e nenhuma empresa em comum com outro grupo
+    # (`reserva()` só entrega ids ainda não usados). O motivo é a tela: com todos
+    # os grupos em quatro níveis, o controle de profundidade parava de mudar a
+    # resposta a partir do 3 — o apresentador subia para 5 e via exatamente as
+    # mesmas empresas. Agora o slider distingue os grupos entre si, e o grupo de
+    # seis níveis é o que prova até onde o `$graphLookup` vai.
+    #
+    # A largura cresce com o nível para a árvore parecer conglomerado e não
+    # cordão: as folhas são sempre a maior camada.
     vitrine_grupos = []
     for v in range(n_vitrine):
-        raiz = reserva(1)[0]
-        subs = reserva(3)          # nível 1
-        netas = reserva(9)         # nível 2
-        bisnetas = reserva(12)     # nível 3
-        for sub in subs:
-            pares.append((raiz, sub))
-        for i, neta in enumerate(netas):
-            pares.append((subs[i % len(subs)], neta))
-        for i, bis in enumerate(bisnetas):
-            pares.append((netas[i % len(netas)], bis))
-        # Participação cruzada: uma controlada de um ramo também tem participação
-        # de outro ramo. Existe em grupo real, e é o que impede que a cadeia seja
-        # uma árvore perfeita — o `$graphLookup` visita o nó por dois caminhos e
-        # a deduplicação de arestas passa a importar de verdade.
-        # Os alvos são escolhidos para **não** coincidir com o pai que o laço
-        # acima já deu a eles: `bisnetas[11]` tem `netas[11 % 9] = netas[2]` como
-        # controladora, então cruzar por netas[2] repetiria a mesma aresta e o
-        # `_id` determinístico colidiria na carga.
-        pares.append((subs[2], netas[1]))
-        pares.append((netas[5], bisnetas[0]))
-        membros = [raiz, *subs, *netas, *bisnetas]
+        profundidade = (v % GRUPO_PROFUNDIDADES) + 1
+        larguras = larguras_por_nivel(profundidade)
+
+        niveis: list[list[int]] = [reserva(1)]         # nível 0: a holding de topo
+        for largura in larguras:
+            niveis.append(reserva(largura))
+
+        for n, filhos in enumerate(niveis[1:], start=1):
+            pais = niveis[n - 1]
+            for i_f, filho in enumerate(filhos):
+                pares.append((pais[i_f % len(pais)], filho))
+
+        # Participação cruzada: uma controlada de um ramo também recebe
+        # participação de outro ramo. Existe em grupo real, e é o que impede que
+        # a cadeia seja uma árvore perfeita — o `$graphLookup` visita o nó por
+        # dois caminhos e a deduplicação de arestas passa a importar de verdade.
+        #
+        # O alvo é escolhido para **não** repetir o pai que o laço acima já deu:
+        # `_id` da aresta é determinístico sobre (owner, owned), e um par repetido
+        # não é "duas participações", é colisão de chave na carga limpa.
+        cruzadas: list[tuple[int, int]] = []
+        for n in range(1, len(niveis)):
+            pais, filhos = niveis[n - 1], niveis[n]
+            if len(pais) < 2 or not filhos:
+                continue
+            filho = filhos[-1]
+            pai_real = pais[(len(filhos) - 1) % len(pais)]
+            outro = next((p for p in pais if p != pai_real), None)
+            if outro is not None:
+                cruzadas.append((outro, filho))
+        pares.extend(cruzadas)
+
+        membros = [c for nivel in niveis for c in nivel]
         setor = setores[v % len(setores)]
         for m in membros:
             setor_por_empresa[m] = setor
         membros_por_grupo.append(membros)
+
+        base = niveis[-1]
+        # Inadimplente um nível acima do solicitante e noutro ramo: o problema
+        # não está em quem pediu. Num grupo de um nível só, "acima" é a holding.
+        acima = niveis[-2] if len(niveis) >= 2 else niveis[0]
         vitrine_grupos.append(
             {
                 "membros": membros,
-                "raiz": raiz,
+                "raiz": niveis[0][0],
+                "niveis": profundidade,
                 # Solicitante na base da árvore: é dele que subir a cadeia importa.
-                "solicitante": bisnetas[0],
-                # Inadimplente noutro ramo: o problema não está em quem pediu.
-                "inadimplente": netas[-1],
+                "solicitante": base[0],
+                "inadimplente": acima[-1],
                 "setor": setor,
-                "ponte_alvo": bisnetas[1],
-                "cruzadas": [(subs[1], netas[0]), (netas[2], bisnetas[-1])],
+                "ponte_alvo": base[1] if len(base) > 1 else base[0],
+                "cruzadas": cruzadas,
             }
         )
 
@@ -452,7 +497,7 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--companies", type=int, default=1_200_000)
     p.add_argument("--groups", type=int, default=40_000)
-    p.add_argument("--showcase", type=int, default=40, help="grupos de vitrine de 4 níveis")
+    p.add_argument("--showcase", type=int, default=40, help="grupos de vitrine, um por profundidade societária")
     p.add_argument("--max-chain", type=int, default=10, help="profundidade da cadeia longa")
     p.add_argument("--credit-rate", type=float, default=0.32, help="fração com crédito no banco")
     p.add_argument("--drop", action="store_true")
@@ -496,7 +541,7 @@ def main() -> None:
     )
     print(
         f"topologia: {len(pares):,} participações entre PJ, {len(holdings):,} controladoras, "
-        f"{len(vitrine_grupos)} grupos de vitrine de 4 níveis, "
+        f"{len(vitrine_grupos)} grupos de vitrine, profundidades 1..{GRUPO_PROFUNDIDADES}, "
         f"{len(pontes)} pontes de sócio PF entre grupos"
     )
 
@@ -538,7 +583,7 @@ def main() -> None:
                     "applicant_id": det_id("company", g["solicitante"]),
                     "distressed_id": det_id("company", g["inadimplente"]),
                     "sector": g["setor"],
-                    "levels": 4,
+                    "levels": g["niveis"],
                     "showcase": True,
                     "bridge_person_id": (
                         det_id("person", g["ponte_person"]) if "ponte_person" in g else None

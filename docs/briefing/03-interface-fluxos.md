@@ -46,7 +46,7 @@ visible the whole time.
 
 ## Graph interaction
 
-Three patterns borrowed from graph investigation tools:
+Four patterns borrowed from graph investigation tools:
 
 - **Neighbour highlighting.** Hovering a node lights up its direct neighbours and
   dims everything else to ~16% opacity. The chain that matters is alone on screen.
@@ -55,20 +55,27 @@ Three patterns borrowed from graph investigation tools:
 - **Progressive disclosure.** No native tooltip: the node detail (hops, degree,
   accounts and when they were opened, risk flags, `_id`) lives in the **Node** tab
   of the inspector, along with the direct neighbours as clickable shortcuts.
-- **Re-settling on drag.** The layout uses `forceAtlas2Based` with
-  `avoidOverlap: 0.85`. Physics stays **frozen at rest** — the design system
-  forbids continuous ambient animation — and comes back during a drag, so nearby
-  nodes make room instead of overlapping. It freezes again once the engine settles,
-  with a 2.5 s ceiling.
+- **A one-shot hop sweep.** On first drawing, colour travels outwards from the
+  subject company one topological hop at a time. Nodes never move, the sweep ends
+  in roughly half a second and any user interaction cancels it. This explains the
+  traversal without turning a deterministic ownership chart into a force demo.
+  It is deliberately **not** presented as an internal `$graphLookup` execution
+  trace.
+- **Local re-settling on drag.** Physics is permanently off. A short deterministic
+  collision pass moves only nodes that overlap the dropped node; the ownership
+  levels and every unrelated position stay stable.
 
-Node size scales with the square root of degree within the subgraph: whoever
-concentrates links stands out before any label is read. Ring nodes get a discreet
-red halo. Blocked nodes get a dashed border.
+Company size follows the credit limit, not graph degree: this is a credit decision,
+so the visual weight follows the money. Companies are boxes and individual owners
+are circles. The subject gets a green border, holdings blue, overdue companies red
+and companies under review a dashed border.
 
-Edge width is 2.4 px, 3 px for device edges and 4.5 px on focus. Colour **is** the
-information here (blue device, amber address, green destination PIX key), and at
-1 px on a dark background the eye cannot separate blue from green at projector
-distance.
+Edges are intentionally quiet at rest: 1.8 px for corporate ownership and 1.5 px
+for individual participation, both at 50% opacity. Their percentage labels appear
+only when the relationship is in context — hover, pinned node or a highlight from
+the inspector. This removes the permanent layer of numbers without hiding the
+information when the analyst asks for it. Focus raises opacity and width; colour
+still distinguishes corporate (blue) from individual (amber) participation.
 
 Framing controls (`+`, `−`, `⤢`) sit over the canvas: after dragging or zooming,
 the presenter returns to the framing without reloading.
@@ -133,21 +140,24 @@ forward, with the close button next to it, which is the way out the analyst want
 ## The alert A/B
 
 `Close case` and `Reset demo` are buttons, not just endpoints. They exist for
-something that used to be impossible to show: injecting the same transaction
-**with** and **without** the network flagged.
+something that used to be impossible to show: the same mechanism producing the
+alert **and** its counterpart, so silence has a shape.
 
-`POST /api/demo/simulate-transaction` accepts `person_ids` — the network on screen
-— and returns `expect_alert`. When nothing is flagged, the screen says in green
-that no alert is the **correct** outcome, not a stalled demo.
+The trigger is the credit review itself. Opening one marks every company in the
+group in a single transaction; the change stream on `companies` picks up those
+documents, coalesces them by `case_id`, and the Alerts tab receives one event with
+the real company count and the exposure now under review. Closing the case emits
+`review_closed` by the same path.
 
-Scoping to `person_ids` is not a detail: without it, after closing the case the
-search for a blocked account found an open case from another network, the
-transaction landed there and the alert fired with the on-screen network already
-free. The A/B was lying.
+That pairing is the argument: the listener reads state instead of firing on its
+own, and the presenter can prove it live in about a second each way. The event
+carries `stream_ms` — commit to arrival, coalescing window included — because
+showing a number smaller than the one actually lived would be demo fiction.
 
-The Alerts tab renders both kinds of event: the red `ring_touch` alert and the grey
-`checked` line saying how many accounts the listener looked at and in how many
-milliseconds. Silence had to have a shape.
+An earlier version had a separate "simulate ownership change" button writing a fake
+edge into `ownership` just to wake the listener. It was removed: it needed a
+paragraph of explanation to mean anything, and the review transaction is a better
+trigger because it is the thing the analyst actually does.
 
 ## The business number, without a new screen
 
@@ -187,11 +197,14 @@ presenter asked for it.
 
 ## Nothing but an alert steals the tab
 
-Every SSE event used to call `setTab('alerts')`. During a large `update_many` on
-`transactions` — the embedding backfill — the interface jumped to Alerts every few
-seconds and it was impossible to type into a search box. Now only `ring_touch`
-switches tabs; edge maintenance and checks stay in the list without hijacking the
-screen.
+Every SSE event used to call `setTab('alerts')`. During a large `update_many` the
+interface jumped to Alerts every few seconds and it was impossible to type into a
+search box. Now only `review_opened` switches tabs; `review_closed` stays in the
+list without hijacking the screen.
+
+The server-side `$match` closes the same hole from the other end: the listener only
+publishes when `credit_status` actually changed, so a bulk load never reaches the
+SSE at all.
 
 ## Search scope
 
@@ -299,9 +312,13 @@ heartbeat every 15 s so the browser does not consider the idle connection dead;
 The full version is in [`docs/demo-script.md`](../demo-script.md), including the
 pre-demo checklist. Summary of the path through the screen:
 
-1. pick an applicant in the selector, depth 1 — five companies, nothing overdue;
-2. depth 2 — the group opens to 25 companies and the arrears appear in a branch the
-   applicant is not part of;
+1. pick an applicant in the selector — the dropdown says how deep its group runs,
+   from 1 to 6 levels — and start at depth 1: the applicant and who controls it
+   directly, nothing overdue;
+2. raise the depth on the six-level group — every step reveals companies the
+   previous one did not, up to 43 at depth 6, and the arrears appear in a branch
+   the applicant is not part of. Then ask for depth 6 on the one-level group: same
+   answer, same latency, because the traversal ends when the tree ends;
 3. the consolidated exposure panel: the number the credit decision needs, which is
    in no single record;
 4. Atlas Search with a partner's name spelled differently, scoped to the group;
@@ -311,9 +328,11 @@ pre-demo checklist. Summary of the path through the screen:
    unrelated;
 7. **Open review** — ACID transaction over the whole group, with the case card and
    the dashed nodes on the graph;
-8. **Register ownership change** — the alert arrives over the change stream;
-9. **Close case** and register again — no alert, and the screen says that is
-   correct;
+8. the Alerts tab — the change stream on `companies` already delivered the event
+   for that transaction, coalesced into one, with the company count and the
+   exposure now under review;
+9. **Close case** — the counterpart event arrives by the same path, which is what
+   proves the listener reads state instead of firing on its own;
 10. switch to **Visibility**: manager, then advisor, then the refusal on the same
     company;
 11. close on architecture: one less system to operate, synchronise and secure.

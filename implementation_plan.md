@@ -78,16 +78,26 @@ right and was not:
   whenever depth ran out. The root is now confirmed against `ownership` inside the
   same aggregation.
 - **Round trips, not traversal.** The group query started as up to ten serial calls
-  and 52 ms; as one aggregation it is 13 ms. On a shallow tree that is the whole
-  game.
+  and 52 ms; as one aggregation it is 16 ms at six levels. On a shallow tree that is
+  the whole game.
 - **Indexing the row instead of the thing compared.** The activity vectors lived on
   1.2 M companies for 32 distinct texts — 29 s per concentration query. They now
   live in `activities`, one document per description.
-- **A carteira that was a lottery.** Advisors were assigned per company, so a
-  25-company group landed on 25 different advisors and the hierarchy meant nothing
-  on screen. Portfolios now concentrate, and the showcase groups are split across
-  three advisors chosen to produce a ladder: advisor 9 of 25, manager 17, regional
-  25.
+- **A carteira that was a lottery.** Advisors were assigned per company, so a group
+  landed on as many advisors as it had companies and the hierarchy meant nothing on
+  screen. Portfolios now concentrate, and every showcase group is split across three
+  advisors chosen to produce a ladder: on the six-level group, advisor 15 of 43,
+  manager 29, regional 43.
+- **One depth for every group.** Every showcase group had four levels, so the depth
+  control stopped changing the answer at 3: the presenter moved it to 6 and saw the
+  same companies. Each showcase group now has its own ownership depth, 1 to 6, with
+  no company shared between groups, and the screen opens on the deepest one.
+- **A trigger that needed a paragraph to mean anything.** The change stream used to
+  be woken by a "simulate ownership change" button writing a fake edge into
+  `ownership`. It is now driven by the credit review itself — the transaction that
+  marks the group is the event — and the listener watches `companies`, filtering
+  server-side on `credit_status` and coalescing the transaction's dozens of events
+  into one.
 - **Search that ignored the screen.** Searching the whole base returned namesakes
   with no relation to the graph in front of the analyst. The scope is now applied in
   the index, and the whole-base search is an explicit entity-resolution gesture.
@@ -101,6 +111,6 @@ and the interface on 5350. Database: `graph_grupo_economico`.
 and CNPJ, razão social, sócio and rating are the words those teams use. The
 repository documentation is in English; code comments are in Portuguese.
 
-Current state, measured: 67 hostile cases passing, the mixed-workload stress passing
+Current state, measured: 66 hostile cases passing, the mixed-workload stress passing
 at 64 concurrent clients, and `/health` reporting `ok` with all three search indexes
-READY.
+READY. Six levels of ownership resolve in 16.3 ms p50 over an 8.5 ms network floor.

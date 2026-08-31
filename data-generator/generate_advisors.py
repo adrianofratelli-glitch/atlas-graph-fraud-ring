@@ -127,8 +127,12 @@ def atribui_carteira(db, n_assessores: int, grupos_vitrine: list[dict]) -> int:
         ops = []
 
     # Fatiamento deliberado dos grupos de vitrine.
+    # Todos os grupos de vitrine, não os cinco primeiros. Antes o laço parava em
+    # `g_idx >= 4`, e a lista da tela — um grupo por profundidade societária —
+    # chega ao sexto: o grupo de seis níveis ficava com a atribuição por bloco e a
+    # escada de visibilidade não cortava mais o grupo ao meio.
     tocados = 0
-    for g_idx, g in enumerate(grupos_vitrine):
+    for g in grupos_vitrine:
         trio = [0, 60, 8]
         ops = [
             UpdateOne(
@@ -140,8 +144,6 @@ def atribui_carteira(db, n_assessores: int, grupos_vitrine: list[dict]) -> int:
         if ops:
             db.companies.bulk_write(ops, ordered=False)
             tocados += len(ops)
-        if g_idx >= 4:  # os cinco primeiros bastam para a demo
-            break
     return tocados
 
 
@@ -190,7 +192,7 @@ def main() -> None:
     )
     print(f"hierarquia: {n:,} pessoas (1 + {args.regionais} + {args.managers} + {args.advisors})")
 
-    grupos = list(db.economic_groups.find({"showcase": True}).limit(5))
+    grupos = list(db.economic_groups.find({"showcase": True}))
     tocados = atribui_carteira(db, args.advisors, grupos)
     print(f"carteira atribuída; grupos de vitrine fatiados entre 3 assessores "
           f"de 2 gerentes ({tocados} empresas)")

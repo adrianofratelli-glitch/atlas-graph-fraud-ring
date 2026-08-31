@@ -30,10 +30,16 @@ record it looks small and clean: rating A, no arrears. Approve?
 whoever controls it directly. Nothing alarming. This is what the analyst sees in
 the core banking system today.
 
-**Step 3. Raise the depth.** At 2 the holding appears; at 3 the whole group does —
-twenty-five companies, four levels, including subsidiaries the applicant's record
-never mentions. Say the number out loud: this answer came from **one** aggregation
-against the cluster.
+**Step 3. Raise the depth.** Each applicant in the picker belongs to a group with a
+**different** ownership depth — the dropdown says which, from 1 to 6 levels. On the
+six-level one, every step of the control reveals companies the previous step did
+not: at 2 the holding appears, at 6 the whole conglomerate does — 43 companies,
+including subsidiaries the applicant's record never mentions. Say the number out
+loud: each of those answers came from **one** aggregation against the cluster, and
+none of them took more than 23 ms of p50 against 1.2 M companies and 2.5 M stakes.
+
+Then ask for depth 6 on the one-level group. Same answer as depth 1, same latency:
+the traversal ends when the tree ends, not when the budget does.
 
 **Step 4. The consolidated figure.** The panel sums limit, drawn and overdue over
 every entity the traversal reached. That number is the credit decision, and it
@@ -55,19 +61,24 @@ finding the analyst cannot reach by reading records one at a time.
 group and opens the case. Try to open it twice: you get a 409 with the existing
 `case_id`, not a duplicate.
 
-**Step 8. The group changes after you approve it.** This is what the button proves,
-so say the question before pressing it: *the credit was approved on Monday; a new
-company enters the group on Wednesday, carrying its own exposure and its own
-arrears. When does the bank find out?*
+**Step 8. Who else finds out, and when.** Opening the review marked dozens of
+companies in one transaction. Ask the question before showing the answer: *the desk
+that runs limits, the monitoring team, the analyst on the next case — how do they
+learn this group is now blocked?*
 
-Pressing it writes one new stake into `ownership`. The change stream picks it up
-and the screen receives the event in seconds, with no polling — and the alert names
-what entered and how much overdue came with it. On a group **not** under review the
-same write produces a recorded check and no alert; the A/B is the point, because
-silence has to be provably correct rather than a broken listener.
+Switch to the Alerts tab. The event is already there: it arrived on its own, with
+no polling and no scheduled job. It names the case, how many companies entered
+review, and the exposure they add up to — and it reports the milliseconds between
+the transaction committing and the event landing.
 
-In most banks that window is covered by a nightly or monthly batch. Here it is the
-same database emitting the event.
+Then close the review. The counterpart event arrives by the same path, in the same
+time window. That A/B is the point: the listener reads state instead of firing on
+its own.
+
+Worth naming: `update_many` over 40 companies produces 40 change events, not one.
+The listener coalesces them by case and publishes a single event with the real
+count. In most banks this window is covered by a nightly batch. Here it is the same
+database emitting the event.
 
 ## Part 2 — who may see what (about 5 minutes)
 
@@ -120,7 +131,7 @@ Click the same row again to release the highlight.
 ## Proving it holds up, before you present
 
 ```bash
-.venv/bin/python tests/test_resilience.py     # 58 hostile cases
+.venv/bin/python tests/test_resilience.py     # 66 hostile cases
 .venv/bin/python tests/stress.py              # mixed workload up to 64 concurrent
 ```
 

@@ -136,7 +136,6 @@ See `docs/adr/0001-topologia-do-dado-sintetico.md`.
 | GET | `/api/credit/case/{case_id}` | the open case with the before/after of what the transaction changed |
 | POST | `/api/credit/close/{case_id}` | closes a case |
 | POST | `/api/demo/reset` | returns the dataset to its pre-demo state |
-| POST | `/api/demo/ownership-change` | registers an ownership change on the group on screen, with or without it being under review |
 | GET | `/api/alerts/stream` | SSE fed by the change stream |
 | GET | `/api/alerts/recent` | the most recent persisted alerts |
 

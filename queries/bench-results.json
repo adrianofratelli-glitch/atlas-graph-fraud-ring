@@ -1,82 +1,118 @@
 {
-  "measured_at": "2026-08-28T10:20:23-0300",
+  "measured_at": "2026-08-31T14:07:01-0300",
   "runs": 30,
   "network_floor_ms": {
-    "p50": 8.2,
-    "p95": 10.0,
-    "min": 6.7,
-    "max": 10.8
+    "p50": 8.5,
+    "p95": 31.4,
+    "min": 7.3,
+    "max": 47.4
   },
   "volume": {
     "companies": 1200000,
-    "ownership": 2505631,
-    "credit_exposure": 384577,
+    "ownership": 2505533,
+    "credit_exposure": 384509,
     "people": 800000,
     "advisors": 969
   },
   "scenarios": [
     {
-      "p50": 15.3,
-      "p95": 24.7,
-      "min": 13.9,
-      "max": 30.6,
-      "scenario": "grupo econômico, profundidade 2",
+      "p50": 13.3,
+      "p95": 15.3,
+      "min": 11.8,
+      "max": 17.2,
+      "scenario": "grupo econômico de 1 níveis, profundidade 1",
       "family": "traversal",
-      "over_floor_p50": 7.1
+      "over_floor_p50": 4.8
     },
     {
-      "p50": 15.0,
-      "p95": 16.6,
-      "min": 13.4,
-      "max": 17.1,
-      "scenario": "grupo econômico, profundidade 3",
+      "p50": 14.1,
+      "p95": 16.9,
+      "min": 11.8,
+      "max": 20.6,
+      "scenario": "grupo econômico de 2 níveis, profundidade 2",
+      "family": "traversal",
+      "over_floor_p50": 5.6
+    },
+    {
+      "p50": 15.3,
+      "p95": 18.6,
+      "min": 14.2,
+      "max": 25.0,
+      "scenario": "grupo econômico de 3 níveis, profundidade 3",
       "family": "traversal",
       "over_floor_p50": 6.8
     },
     {
-      "p50": 15.2,
-      "p95": 17.0,
-      "min": 13.7,
-      "max": 20.6,
-      "scenario": "grupo econômico, profundidade 6 (teto)",
+      "p50": 15.3,
+      "p95": 28.3,
+      "min": 14.1,
+      "max": 41.0,
+      "scenario": "grupo econômico de 4 níveis, profundidade 4",
       "family": "traversal",
-      "over_floor_p50": 7.0
+      "over_floor_p50": 6.8
     },
     {
-      "p50": 11.0,
-      "p95": 12.6,
-      "min": 10.1,
-      "max": 13.4,
+      "p50": 16.1,
+      "p95": 19.5,
+      "min": 14.0,
+      "max": 20.7,
+      "scenario": "grupo econômico de 5 níveis, profundidade 5",
+      "family": "traversal",
+      "over_floor_p50": 7.6
+    },
+    {
+      "p50": 16.3,
+      "p95": 19.7,
+      "min": 13.7,
+      "max": 20.5,
+      "scenario": "grupo econômico de 6 níveis, profundidade 6",
+      "family": "traversal",
+      "over_floor_p50": 7.8
+    },
+    {
+      "p50": 16.6,
+      "p95": 41.9,
+      "min": 13.7,
+      "max": 327.0,
+      "scenario": "grupo mais fundo, profundidade 6 (teto)",
+      "family": "traversal",
+      "over_floor_p50": 8.1
+    },
+    {
+      "p50": 12.2,
+      "p95": 37.4,
+      "min": 11.0,
+      "max": 38.2,
       "scenario": "empresa sem grupo, profundidade 3",
       "family": "traversal",
-      "over_floor_p50": 2.8
+      "over_floor_p50": 3.7
     },
     {
-      "p50": 52.8,
-      "p95": 57.9,
-      "min": 51.0,
-      "max": 63.3,
+      "p50": 43.1,
+      "p95": 61.4,
+      "min": 40.9,
+      "max": 64.8,
       "scenario": "carteira do gerente",
       "family": "hierarquia",
-      "over_floor_p50": 44.6
+      "over_floor_p50": 34.6
     },
     {
-      "p50": 15.0,
-      "p95": 43.0,
-      "min": 14.1,
-      "max": 45.3,
+      "p50": 17.7,
+      "p95": 53.5,
+      "min": 13.8,
+      "max": 76.5,
       "scenario": "carteira do assessor",
       "family": "hierarquia",
-      "over_floor_p50": 6.8
+      "over_floor_p50": 9.2
     },
     {
       "p50": 9.5,
-      "p95": 13.8,
+      "p95": 15.9,
       "min": 8.1,
-      "max": 37.5,
+      "max": 18.8,
       "scenario": "checagem de visibilidade",
       "family": "hierarquia",
-      "over_floor_p50": 1.3
+      "over_floor_p50": 1.0
     }
   ],
   "note": "medido do cliente; o piso de rede está incluído em toda linha. Compare incrementos sobre o piso, não absolutos."

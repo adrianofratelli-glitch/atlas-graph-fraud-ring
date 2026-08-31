@@ -340,38 +340,39 @@ def change_stream(ctx: dict) -> None:
     post("/api/demo/reset")
     ids = ctx["company_ids"]
 
-    # A: grupo livre -> verificação, sem alerta
+    # A: abrir revisão marca as empresas numa transação -> o listener acorda
     antes = get("/api/alerts/recent").json()["listener"]
-    r = post("/api/demo/ownership-change", {"company_ids": ids})
-    check("alteração societária com grupo livre responde 200", r.status_code == 200,
-          f"HTTP {r.status_code}")
-    check("e informa que não deve alertar", r.json()["expect_alert"] is False)
+    caso = post("/api/credit/review", {"company_ids": ids, "reason": "cs"}).json()
+    prazo = time.time() + 25
+    st = antes
+    while time.time() < prazo:
+        st = get("/api/alerts/recent").json()["listener"]
+        if st["alerts"] > antes["alerts"]:
+            break
+        time.sleep(1)
+    check("abrir revisão dispara alerta em <25s",
+          st["alerts"] > antes["alerts"], f"{antes['alerts']} -> {st['alerts']}")
+
+    alertas = get("/api/alerts/recent").json()["alerts"]
+    check("o alerta diz quanta exposição entrou sob revisão",
+          bool(alertas) and "under_review_limite" in alertas[0])
+    check("e coalesce a transação num evento só, com a contagem real",
+          bool(alertas) and alertas[0].get("companies", 0) > 1,
+          f"companies={alertas[0].get('companies') if alertas else None}")
+
+    # B: encerrar devolve a contrapartida pelo mesmo mecanismo
+    antes = get("/api/alerts/recent").json()["listener"]
+    post(f"/api/credit/close/{caso['case_id']}")
     prazo = time.time() + 25
     while time.time() < prazo:
         st = get("/api/alerts/recent").json()["listener"]
         if st["checks_published"] > antes["checks_published"]:
             break
         time.sleep(1)
-    check("o listener publica a verificação mesmo sem alertar",
+    check("encerrar a revisão também publica evento",
           st["checks_published"] > antes["checks_published"],
           f"{antes['checks_published']} -> {st['checks_published']}")
 
-    # B: grupo sob revisão -> alerta
-    caso = post("/api/credit/review", {"company_ids": ids, "reason": "cs"}).json()
-    antes = get("/api/alerts/recent").json()["listener"]
-    post("/api/demo/ownership-change", {"company_ids": ids})
-    prazo = time.time() + 25
-    while time.time() < prazo:
-        st = get("/api/alerts/recent").json()["listener"]
-        if st["alerts"] > antes["alerts"]:
-            break
-        time.sleep(1)
-    check("alteração em grupo sob revisão dispara alerta em <25s",
-          st["alerts"] > antes["alerts"], f"{antes['alerts']} -> {st['alerts']}")
-
-    alertas = get("/api/alerts/recent").json()["alerts"]
-    check("o alerta diz o que entrou no grupo",
-          bool(alertas) and "added_limite" in alertas[0])
     check("listener continua vivo", get("/health").json()["checks"]["change_stream"]["running"])
 
     post(f"/api/credit/close/{caso['case_id']}")

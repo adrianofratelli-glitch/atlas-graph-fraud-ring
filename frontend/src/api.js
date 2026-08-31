@@ -76,10 +76,5 @@ export const api = {
   caseDetail: (caseId) => call(`/api/credit/case/${encodeURIComponent(caseId)}`),
   closeReview: (caseId) =>
     call(`/api/credit/close/${encodeURIComponent(caseId)}`, { method: 'POST' }),
-  ownershipChange: (companyIds) =>
-    call('/api/demo/ownership-change', {
-      method: 'POST',
-      body: JSON.stringify({ company_ids: companyIds ?? null }),
-    }),
   reset: () => call('/api/demo/reset', { method: 'POST' }),
 }

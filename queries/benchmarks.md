@@ -16,10 +16,10 @@
 | | |
 |---|---|
 | Cluster tier | M20 (4 GB RAM, 150 GB disk), shared with other applications |
-| Network floor to the cluster | **8.2 ms** p50 |
-| Volume | 1,200,000 companies · 2,505,631 ownership edges · 800,000 individuals · 384,577 credit exposures · 969 advisors · 32 activities |
-| Showcase groups | 40, four levels, 25 companies each, with cross-holdings and a bridge shareholder |
-| Measured | 2026-08-28 |
+| Network floor to the cluster | **8.5 ms** p50 |
+| Volume | 1,200,000 companies · 2,505,533 ownership edges · 800,000 individuals · 384,509 credit exposures · 969 advisors · 32 activities |
+| Showcase groups | 40, ownership depths 1 to 6 (7 to 43 companies), disjoint, with cross-holdings and a bridge shareholder |
+| Measured | 2026-08-31 |
 
 **Read the network floor before any other number.** Every time below includes it;
 what the benchmark measures is the **increment** over the floor, which is the part
@@ -38,14 +38,14 @@ attributable to the query.
 
 For a shallow tree queried by business key, the customer's bottleneck is not the
 traversal. It is loading the base and operating it. `data-generator` writes
-`queries/load-results.json` on every clean load. Measured 2026-08-28:
+`queries/load-results.json` on every clean load. Measured 2026-08-31:
 
 | Collection | Documents | Time | Rate |
 |---|---|---|---|
-| `companies` | 1,200,000 | 91.0 s | 13,189 docs/s |
-| `ownership` | 2,505,631 | 206.1 s | 12,155 docs/s |
-| `credit_exposure` | 384,577 | 20.1 s | 19,124 docs/s |
-| **total** | **4,090,208** | **317.2 s** | **12,893 docs/s — 46.4 M/hour** |
+| `companies` | 1,200,000 | 87.2 s | 13,765 docs/s |
+| `ownership` | 2,505,533 | 211.4 s | 11,850 docs/s |
+| `credit_exposure` | 384,509 | 20.2 s | 19,010 docs/s |
+| **total** | **4,090,042** | **318.8 s** | **12,828 docs/s — 46.2 M/hour** |
 
 Measured with `insert_many` in unordered batches of 2,000, **from a workstation
 against a shared M20 over the public internet** — client network latency is
@@ -62,23 +62,47 @@ Record the conditions or the number is noise.
 
 ### Ownership chain — the main demo path
 
-| Scenario | p50 | Over floor |
-|---|---|---|
-| economic group, depth 2 | 15.3 ms | **+7.1 ms** |
-| economic group, depth 3 | 15.0 ms | +6.8 ms |
-| economic group, depth 6 (cap) | 15.2 ms | +7.0 ms |
-| company with no group, depth 3 | 11.0 ms | +2.8 ms |
+Each showcase group has its own ownership depth, and each row below is that group
+queried **at its own depth** — the traversal reaching the floor of the tree, not
+stopping short of it. Network floor for this round: p50 8.5 ms.
 
-Depth costs almost nothing here, and that is the point of the pattern: the tree is
-shallow, so the traversal saturates early and the extra levels find nobody new.
+| Scenario | Companies reached | p50 | Over floor |
+|---|---|---|---|
+| 1-level group, depth 1 | 7 | 13.3 ms | **+4.8 ms** |
+| 2-level group, depth 2 | 13 | 14.1 ms | +5.6 ms |
+| 3-level group, depth 3 | 19 | 15.3 ms | +6.8 ms |
+| 4-level group, depth 4 | 25 | 15.3 ms | +6.8 ms |
+| 5-level group, depth 5 | 31 | 16.1 ms | +7.6 ms |
+| 6-level group, depth 6 | 43 | 16.3 ms | +7.8 ms |
+| deepest group, depth 6 (cap) | 43 | 16.6 ms | +8.1 ms |
+| company with no group, depth 3 | 1 | 12.2 ms | +3.7 ms |
+
+Six levels of ownership over 1.2 M companies and 2.5 M stakes cost **7.8 ms** of
+real database work. Going from one level to six costs 3 ms more — the curve is
+flat, and against a 200 ms interactive budget the headroom is roughly 25×.
+
+That headroom is the answer to "how deep can it go?": the cap of 6 is a modelling
+choice about what a Brazilian ownership chain actually looks like, not a latency
+ceiling. Raising `GRUPO_PROFUNDIDADES` and `GRAPH_MAX_DEPTH_CAP` together and
+reloading is all it takes to go further.
+
+Two things this table settles, and the second is the one that gets argued:
+
+- **Depth is not where the cost is.** Each extra level adds well under a
+  millisecond, because the traversal is index-driven on `ownership.owner_id` /
+  `owned_id` and the tree fans out to tens of nodes, not millions.
+- **Asking for more depth than the tree has is free.** The last two rows are the
+  same group at its own depth and at the cap: same answer, same latency. The
+  traversal ends when the tree ends. Never sell depth 6 as "expensive" — the
+  screen will contradict you.
 
 ### Commercial hierarchy — visibility scope
 
 | Scenario | Scope | p50 | Over floor |
 |---|---|---|---|
-| advisor's own book | 1 advisor, 421 accounts with credit | 15.0 ms | +6.8 ms |
-| manager's book | 16 advisors, 6,317 accounts with credit | 52.8 ms | +44.6 ms |
-| visibility check on one account | — | 9.5 ms | +1.3 ms |
+| advisor's own book | 1 advisor, 421 accounts with credit | 17.7 ms | +9.2 ms |
+| manager's book | 16 advisors, 6,317 accounts with credit | 43.1 ms | +34.6 ms |
+| visibility check on one account | — | 9.5 ms | +1.0 ms |
 
 The regional level (129 advisors, ~51,000 accounts with credit) answers in about
 **460 ms**. It is the honest ceiling of this shape: the traversal is still trivial,

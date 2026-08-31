@@ -37,6 +37,7 @@ traversals do not work:
 | `advisors` | `{reports_to: 1}` | connect field walking down the hierarchy |
 | `credit_exposure` | `{company_id: 1}` unique | hydration of the group's exposure |
 | `credit_exposure` | `{advisor_id: 1}` | the consolidated book, without a join per company |
+| `credit_exposure` | `{review_flag: 1}` sparse | open-review queue and deterministic demo reset |
 
 ### Two deliberate decisions about indexes
 
@@ -51,6 +52,11 @@ walking `companies` in scope and looking up the exposure per document: 13 second
 for a regional. Only ~32% of companies have credit and it is the exposure document
 that carries the number, so the same answer is an indexed `$match` plus a `$group`
 — 462 ms. Denormalisation with a stated owner and a stated reason, not by accident.
+
+**`review_flag` is sparse.** Only exposures in an open review carry the field, so
+indexing absent values would buy nothing. The index was added after Performance
+Advisor identified the reset/queue predicate as the remaining application read
+without a useful access path.
 
 ## The direction of the ownership edge
 
@@ -125,9 +131,9 @@ behaviour.
 
 ## What the change stream does, and does not, maintain
 
-In this project the stream reacts to ownership changes to raise the alert. It does
-**not** maintain a derived edge collection, because the ownership edge *is* the
-source data — there is nothing to materialise.
+In this project the stream reacts to the credit review changing state, to raise the
+alert. It does **not** maintain a derived edge collection, because the ownership
+edge *is* the source data — there is nothing to materialise.
 
 The one derived field that does exist, `advisor_id` on `credit_exposure`, is
 maintained by the generator, not by a listener. Say that out loud in an
@@ -136,18 +142,33 @@ is how a demo becomes a support ticket a year later.
 
 ## Change Streams
 
-`ownership.watch()` on its own thread, with `full_document="updateLookup"`,
+`companies.watch()` on its own thread, with `full_document="updateLookup"`,
 `max_await_time_ms` (so it does not block shutdown) and a **stored `resume_token`**,
 to pick up where it left off if the cursor drops during a failover. Each SSE
 subscriber has a queue capped at 200 events: a slow client must not let the
 listener grow memory without a ceiling.
 
-The listener publishes two kinds of event. `group_changed` is the alert: an
-ownership change touching a group under review. `checked` is a change that touched
-**no** company under review, and it reports how many were checked and in how many
-milliseconds. That one exists because silence must not look like a broken demo —
-registering a change on a free group is half the A/B, and without an event on
-screen the presenter has no proof the listener even woke up.
+The `$match` runs **server-side**, over `updateDescription.updatedFields`: only a
+change to `credit_status` travels the wire. A bulk load touches `companies` without
+going near that field, so it produces no SSE noise at all — the filter is the
+reason the listener can watch a 1.2 M-document collection safely.
+
+The trigger is opening a credit review. That transaction marks dozens of companies
+at once, and each marked document is its own change event — `update_many` over 40
+companies yields 40 events, not one. The listener coalesces them by `case_id` over
+a short window and publishes **one** event carrying the real count, which is also
+the number the presenter wants on screen.
+
+Two kinds of event. `review_opened` is the alert: a new case, how many companies
+entered review, and the credit exposure they add up to. `review_closed` is the
+counterpart — the case was closed and the companies went back to `active`. The
+second exists because the A/B is what proves the listener reads state instead of
+firing on its own: the same mechanism publishes both sides, and closing the review
+in front of the customer returns an event in the same time window.
+
+The event reports `stream_ms` — first event of the transaction to publish,
+coalescing window included. Showing a number smaller than the one actually lived
+would be demo fiction.
 
 Worth knowing before a demo: after a large batch write the listener spends time
 draining the oplog from its stored resume token, and new events only appear once it

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import GraphCanvas from './GraphCanvas'
+import QueryDetails from './QueryDetails'
 import { api } from './api'
 
 const DEPTHS = [1, 2, 3, 4, 5, 6]
@@ -29,7 +30,6 @@ export default function App() {
   const [caseInfo, setCaseInfo] = useState(null)
   const [caseDetail, setCaseDetail] = useState(null)
   const [alerts, setAlerts] = useState([])
-  const [lastSim, setLastSim] = useState(null)
   const [search, setSearch] = useState({ q: '', out: null, degraded: null, todaBase: false })
   const [conc, setConc] = useState({ out: null, degraded: null, saturado: null, loading: false })
   const [tab, setTab] = useState('company')
@@ -55,7 +55,15 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (entry?.applicants?.length && !cnpj) setCnpj(entry.applicants[0].cnpj)
+    if (!entry?.applicants?.length || cnpj) return
+    // A lista vem do raso ao fundo, mas a demo abre no grupo **mais fundo**: é
+    // nele que cada passo do controle de profundidade revela empresa nova, e é o
+    // passo 3 do roteiro. Quem quiser o caso raso escolhe na lista.
+    const maisFundo = entry.applicants.reduce(
+      (a, b) => ((b.group_levels ?? 0) > (a.group_levels ?? 0) ? b : a),
+      entry.applicants[0]
+    )
+    setCnpj(maisFundo.cnpj)
   }, [entry, cnpj])
 
   // Destaque é sempre relativo ao grafo que está na tela: trocar de empresa, de
@@ -91,12 +99,15 @@ export default function App() {
     es.onmessage = (ev) => {
       const evento = JSON.parse(ev.data)
       setAlerts((prev) => [evento, ...prev].slice(0, 20))
-      // Só alerta de verdade troca a aba. Verificação sem alerta fica na lista
-      // sem tirar o apresentador da tela em que ele está.
-      if (evento.type === 'group_changed') setTab('alerts')
+      // Abrir revisão troca a aba: é o evento que o apresentador quer ver
+      // chegando sozinho. O encerramento fica na lista sem tirá-lo da tela.
+      if (evento.type === 'review_opened') setTab('alerts')
     }
     return () => es.close()
   }, [])
+
+  const solicitanteNiveis =
+    (entry?.applicants ?? []).find((a) => a.cnpj === cnpj)?.group_levels ?? null
 
   // Quais empresas do grupo na tela o usuário selecionado alcança.
   //
@@ -217,7 +228,6 @@ export default function App() {
         exposure
       )
       setCaseInfo(info)
-      setLastSim(null)
       setCaseDetail(await api.caseDetail(info.case_id).catch(() => null))
       await carrega(cnpj, depth)
     } catch (e) {
@@ -248,7 +258,6 @@ export default function App() {
       await api.closeReview(caseInfo.case_id)
       setCaseInfo(null)
       setCaseDetail(null)
-      setLastSim(null)
       await carrega(cnpj, depth)
     } catch (e) {
       setError(e.message)
@@ -263,23 +272,12 @@ export default function App() {
       await api.reset()
       setCaseInfo(null)
       setCaseDetail(null)
-      setLastSim(null)
       setAlerts([])
       await carrega(cnpj, depth)
     } catch (e) {
       setError(e.message)
     } finally {
       setBusy(false)
-    }
-  }
-
-  const doOwnershipChange = async () => {
-    try {
-      const out = await api.ownershipChange(companyIds)
-      setLastSim(out)
-      if (!out.expect_alert) setTab('alerts')
-    } catch (e) {
-      setError(e.message)
     }
   }
 
@@ -351,6 +349,7 @@ export default function App() {
                 {(entry?.applicants ?? []).map((a) => (
                   <option key={a.cnpj} value={a.cnpj}>
                     {a.razao_social}
+                    {a.group_levels ? ` — ${a.group_levels} ${a.group_levels === 1 ? 'nível' : 'níveis'}` : ''}
                   </option>
                 ))}
               </optgroup>
@@ -379,8 +378,10 @@ export default function App() {
               ))}
             </div>
             <p className="muted small">
-              A maioria das consultas reais resolve entre 2 e 4. Mais fundo é suportado e mostrado,
-              não é o caso típico.
+              Cada solicitante da lista pertence a um grupo com profundidade diferente
+              {solicitanteNiveis ? ` — este tem ${solicitanteNiveis}` : ''}. Subir além do fundo da
+              árvore devolve o mesmo grupo: é o traversal terminando, não a consulta falhando. A
+              maioria das consultas reais resolve entre 2 e 4.
             </p>
           </section>
 
@@ -397,30 +398,6 @@ export default function App() {
             )}
 
             {caseInfo && <CaseCard info={caseInfo} detail={caseDetail} exposure={exposure} />}
-
-            <button
-              className="btn btn-ghost btn-block"
-              disabled={busy || !companyIds.length}
-              onClick={doOwnershipChange}
-            >
-              Simular entrada de empresa no grupo
-            </button>
-            {/* O botão não se explicava sozinho. Ele existe para responder uma
-                pergunta específica: o grupo muda **depois** que o crédito foi
-                aprovado — e o banco descobre isso quando? */}
-            <p className="muted small">
-              Escreve uma participação nova em <code>ownership</code>. O change stream detecta e a
-              tela recebe o evento em segundos, sem polling — com o grupo sob revisão vira alerta,
-              sem revisão vira só uma verificação registrada. O grupo econômico muda depois da
-              aprovação, e é essa janela que o processo em lote não cobre.
-            </p>
-            {lastSim && (
-              <p className={`notice ${lastSim.expect_alert ? 'notice-bad' : 'notice-ok'}`}>
-                {lastSim.expect_alert
-                  ? `${lastSim.acquirer.name} adquiriu ${lastSim.acquired.name} — o alerta deve aparecer em Alertas.`
-                  : 'Alteração registrada num grupo sem revisão aberta. Não alertar é o resultado correto: o listener leu o estado e não tinha o que reportar.'}
-              </p>
-            )}
 
             <div className="btn-row">
               <button className="btn btn-ghost" disabled={busy || !caseInfo} onClick={doClose}>
@@ -784,16 +761,17 @@ export default function App() {
                 />
                 {alerts.length === 0 ? (
                   <p className="muted small">
-                    Nada ainda. Registre uma alteração societária: com o grupo sob revisão sai
-                    alerta, sem revisão sai a verificação — e as duas aparecem aqui.
+                    Nada ainda. Abra uma revisão de crédito sobre o grupo: a transação marca as
+                    empresas, o change stream acorda e o evento chega aqui sem polling — e encerrar
+                    a revisão devolve a contrapartida pelo mesmo caminho.
                   </p>
                 ) : (
                   alerts.map((a) =>
-                    a.type === 'checked' ? (
-                      <div className="alert alert-check" key={a.edge_id}>
-                        <strong>Alteração verificada</strong> — nenhuma empresa sob revisão, sem alerta
+                    a.type === 'review_closed' ? (
+                      <div className="alert alert-check" key={`${a.case_id}-closed-${a.at}`}>
+                        <strong>Revisão encerrada</strong> — {a.companies} empresas voltaram a ativo
                         <em>
-                          {a.checked_companies} empresas verificadas em {a.lookup_ms} ms ·{' '}
+                          caso {a.case_id} · evento em {a.stream_ms} ms ·{' '}
                           {new Date(a.at).toLocaleTimeString('pt-BR')}
                         </em>
                       </div>
@@ -801,24 +779,20 @@ export default function App() {
                       <button
                         type="button"
                         className="alert as-button"
-                        key={a.edge_id}
-                        onClick={() =>
-                          aponta(
-                            (group?.nodes ?? [])
-                              .filter(
-                                (n) => n.label === a.acquirer || n.label === a.acquired
-                              )
-                              .map((n) => n.id)
-                          )
-                        }
+                        key={`${a.case_id}-open-${a.at}`}
+                        onClick={() => aponta(companyIds)}
                       >
-                        <strong>{a.acquirer}</strong> adquiriu {a.percentage}% de {a.acquired}
+                        <strong>{a.companies} empresas</strong> entraram sob revisão de crédito
                         <em>
-                          entrou no grupo: limite {money(a.added_limite, exposure?.currency)}
-                          {a.added_vencido > 0 ? ` · vencido ${money(a.added_vencido, exposure?.currency)}` : ''}
+                          exposição sob revisão: limite{' '}
+                          {money(a.under_review_limite, exposure?.currency)}
+                          {a.under_review_vencido > 0
+                            ? ` · vencido ${money(a.under_review_vencido, exposure?.currency)}`
+                            : ''}
                         </em>
                         <em>
-                          verificado em {a.lookup_ms} ms · {new Date(a.at).toLocaleTimeString('pt-BR')}
+                          caso {a.case_id} · evento em {a.stream_ms} ms, soma em {a.lookup_ms} ms ·{' '}
+                          {new Date(a.at).toLocaleTimeString('pt-BR')}
                         </em>
                       </button>
                     )
@@ -828,10 +802,17 @@ export default function App() {
             )}
           </div>
 
-          <details className="query-drawer">
-            <summary>Consulta executada</summary>
-            <pre>{JSON.stringify(pipelinePreview(cnpj, group), null, 2)}</pre>
-          </details>
+          <QueryDetails
+            operation={group?.query_details?.operation}
+            namespace={group?.query_details?.namespace}
+            query={group?.query_details?.pipeline}
+            explain={{
+              round_trips: group?.stats?.round_trips,
+              elapsed_ms: group?.stats?.elapsed_ms,
+              truncated: group?.stats?.truncated,
+              note: 'A busca pontual por CNPJ e as junções usam os índices declarados em schema/indexes.js.',
+            }}
+          />
         </aside>
       </main>
     </div>
@@ -1074,23 +1055,4 @@ function Degraded({ d, feature }) {
       funcionando — a degradação é por recurso, não por tela.
     </p>
   )
-}
-
-function pipelinePreview(cnpj, group) {
-  return [
-    { $match: { cnpj } },
-    {
-      $graphLookup: {
-        from: 'ownership',
-        startWith: '$_id',
-        // Subir a cadeia: quem é dono de mim. Descer troca os dois campos.
-        connectFromField: 'owner_id',
-        connectToField: 'owned_id',
-        as: 'chain',
-        maxDepth: group?.depth ?? 3,
-        depthField: 'level',
-      },
-    },
-    { $lookup: { from: 'credit_exposure', localField: 'chain.owned_id', foreignField: 'company_id', as: 'credit' } },
-  ]
 }

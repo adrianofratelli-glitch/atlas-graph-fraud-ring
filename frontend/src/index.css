@@ -298,7 +298,10 @@ select, input[type='text'] {
   padding: 8px 10px; border-radius: 0 8px 8px 0; font-size: 12.5px;
   margin-bottom: 7px; display: flex; flex-direction: column; gap: 3px;
 }
-.alert em { font-style: normal; color: var(--text-muted); font-size: 10.5px; word-break: break-all; }
+/* `display: block` em `.alert.as-button` desfaz o flex-column do `.alert`, e as
+   linhas de detalhe passavam a colar umas nas outras ("R$ 10.673.097caso
+   credit_..."). Cada `em` é uma linha por conta própria. */
+.alert em { display: block; font-style: normal; color: var(--text-muted); font-size: 10.5px; word-break: break-all; }
 
 .badge {
   display: inline-flex; align-items: center; gap: 5px;

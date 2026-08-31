@@ -1,29 +1,29 @@
 {
-  "measured_at": "2026-08-28T12:44:21.285194+00:00",
+  "measured_at": "2026-08-31T14:52:21.709515+00:00",
   "mode": "insert_many",
   "note": "medido de uma esta\u00e7\u00e3o de trabalho contra um cluster remoto; a lat\u00eancia do cliente est\u00e1 inclu\u00edda e domina. Carga de produ\u00e7\u00e3o roda na mesma regi\u00e3o do cluster.",
   "collections": {
     "companies": {
       "docs": 1200000,
-      "seconds": 91.2,
-      "docs_per_sec": 13159
+      "seconds": 87.2,
+      "docs_per_sec": 13765
     },
     "ownership": {
-      "docs": 2505631,
-      "seconds": 228.3,
-      "docs_per_sec": 10974
+      "docs": 2505533,
+      "seconds": 211.4,
+      "docs_per_sec": 11850
     },
     "credit_exposure": {
-      "docs": 384577,
-      "seconds": 22.3,
-      "docs_per_sec": 17270
+      "docs": 384509,
+      "seconds": 20.2,
+      "docs_per_sec": 19010
     }
   },
   "total": {
-    "docs": 4090208,
-    "seconds": 341.8,
-    "docs_per_sec": 11968,
-    "docs_per_hour": 43083171
+    "docs": 4090042,
+    "seconds": 318.8,
+    "docs_per_sec": 12828,
+    "docs_per_hour": 46180175
   },
-  "wall_seconds": 342.0
+  "wall_seconds": 319.0
 }

@@ -90,14 +90,17 @@ Entering through the applicant of a showcase group, on the default dataset:
 
 Two things to read here, and the second is the honest one.
 
-**The reveal is real.** At depth 1 the group looks clean; at depth 2 the arrears
-appear, in a branch the applicant is not part of. That is the demo.
+**The reveal is real.** At depth 1 the group looks clean; deeper, the arrears
+appear in a branch the applicant is not part of. Each showcase group has its own
+ownership depth, from 1 to 6 levels, so the control keeps revealing new companies
+right up to that group's floor.
 
-**From depth 2 on, nothing changes.** The tree is shallow and closed, so extra
-levels reach nobody new — and each of those rows costs the same ~4 ms over the
-network floor. Do **not** use this case to talk about degradation: if you tell a
-customer depth 6 is expensive while the screen shows the same 25 companies in the
-same time, the demo contradicts the presenter.
+**Past a group's own depth, nothing changes.** The tree is closed, so extra levels
+reach nobody new — and those rows cost the same. Do **not** use this to talk about
+degradation: if you tell a customer depth 6 is expensive while the screen shows the
+same companies in the same time, the demo contradicts the presenter. Depth costs 5
+to 8 ms of real work across the whole 1-to-6 range; the shape of the tree decides
+the answer, not the number in the control.
 
 That is not a weakness of the measurement. It is the defining property of the
 pattern this POV was built for, and it is exactly why a dedicated graph engine
@@ -109,8 +112,8 @@ Not in depth — in how much the aggregation has to sum afterwards:
 
 | Scope | Advisors reached | Accounts with credit | p50 |
 |---|---|---|---|
-| advisor | 1 | 421 | 14 ms |
-| manager | 16 | 6,317 | 52 ms |
+| advisor | 1 | 421 | 18 ms |
+| manager | 16 | 6,317 | 43 ms |
 | regional | 129 | 50,989 | **462 ms** |
 
 The traversal is trivial at every row — three hops down a 969-person tree. What
@@ -222,8 +225,8 @@ operational data. It is a real trade-off, and it should be presented as one.
 
 ## 6. The demo graph is shallow, and someone will call that convenient
 
-Best to say so before anyone asks. The showcase groups have 25 companies over four
-levels, and traversing them costs a few milliseconds of real work. That proves
+Best to say so before anyone asks. The showcase groups run 1 to 6 levels and 7 to
+43 companies, and traversing the deepest costs 8 ms of real work. That proves
 `$graphLookup` **answers** the question. It proves nothing about a deep or dense
 graph, because the search never does heavy work.
 
