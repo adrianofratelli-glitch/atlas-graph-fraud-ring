@@ -288,6 +288,10 @@ concurrent transactions fighting over the same documents, and a visibility check
 that must actually refuse. The bar is always the same: it may refuse with a clear
 message, it may not throw a generic error and it may not hang.
 
+The portfolio browser stress also reloads the app at 320, 768 and 1600 pixels.
+Controls and the graph stack below 1040 pixels; flexible rail blocks and the
+legend wrap instead of widening the document on a phone.
+
 Before presenting, `GET /health` checks the connection, the counts, the state of the
 search indexes and the time of a reference query. `POST /api/demo/reset` returns
 everything to its initial state. The full script is in

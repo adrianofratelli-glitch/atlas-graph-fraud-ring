@@ -77,12 +77,13 @@ button { font-family: inherit; }
   border: 1px solid var(--border-subtle);
   border-radius: 12px;
   min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
 }
 .rail { padding: 4px 0; overflow-y: auto; }
 
-.block { padding: 12px 14px; border-bottom: 1px solid rgba(61,79,88,.5); }
+.block { min-width: 0; padding: 12px 14px; border-bottom: 1px solid rgba(61,79,88,.5); }
 .block:last-child { border-bottom: 0; }
 .block h2 {
   font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em;
@@ -199,7 +200,7 @@ select, input[type='text'] {
 .metric.warn .v { color: var(--warning); }
 .metric.bad .v { color: var(--danger); }
 
-.legend { display: flex; gap: 12px; font-size: 11.5px; color: var(--text-muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 12px; font-size: 11.5px; color: var(--text-muted); }
 .legend span { display: inline-flex; align-items: center; gap: 5px; }
 
 .canvas-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
@@ -380,6 +381,7 @@ select, input[type='text'] {
   .topbar { height: auto; padding: 8px 12px; flex-wrap: wrap; gap: 8px; }
   .app { grid-template-rows: auto 1fr; }
   .topbar .thesis, .topbar .hint { white-space: normal; }
+  .topbar .thesis { min-width: 0; overflow-wrap: anywhere; }
   .topbar .hint { display: none; }
   .rail .block { flex-basis: 100%; border-right: 0; border-bottom: 1px solid rgba(61,79,88,.5); }
   .check, .depth-btn, .btn, select, input[type='text'] { min-height: 44px; }
