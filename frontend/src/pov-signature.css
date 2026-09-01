@@ -1,4 +1,4 @@
-/* MongoDB PoV portfolio signature.
+/* MongoDB PoV portfolio signature v3.
    Keep this file byte-identical across the independent PoV repositories.
    Domain styling belongs in the app stylesheet; this layer owns shared
    interaction, accessibility and the segmented "document rail". */
@@ -19,6 +19,19 @@
   --pov-radius-md: 12px;
   --pov-radius-lg: 16px;
   --pov-motion: 180ms cubic-bezier(.2,.8,.2,1);
+  --pov-font-sans: Outfit, Inter, "Helvetica Neue", Arial, sans-serif;
+  --pov-font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  --pov-space-1: 4px;
+  --pov-space-2: 8px;
+  --pov-space-3: 12px;
+  --pov-space-4: 16px;
+  --pov-space-5: 24px;
+  --pov-space-6: 32px;
+  --pov-shell-gutter: clamp(16px, 3vw, 48px);
+  --pov-code-bg: #001923;
+  --pov-focus-ring: 0 0 0 3px rgba(4, 152, 236, .24);
+  --pov-skeleton: rgba(193, 199, 198, .08);
+  --pov-skeleton-highlight: rgba(193, 199, 198, .16);
   color-scheme: dark;
 }
 
@@ -26,6 +39,9 @@
   min-height: 100vh;
   isolation: isolate;
   accent-color: var(--pov-green);
+  scrollbar-color: var(--pov-border) var(--pov-bg);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
 }
 
 /* Signature: a BSON/document-inspired rail, repeated across every PoV. */
@@ -84,10 +100,22 @@
 [data-pov-shell] :where(button, [role="button"], a, input, select, textarea, summary):focus-visible {
   outline: 2px solid var(--pov-blue) !important;
   outline-offset: 3px;
+  box-shadow: var(--pov-focus-ring);
 }
 
 [data-pov-shell] :where(input, select, textarea) {
   min-height: 40px;
+  min-width: 0;
+}
+
+[data-pov-shell] :where(button, [role="button"], summary) {
+  min-width: 36px;
+  min-height: 36px !important;
+}
+
+[data-pov-shell] :where(summary) {
+  display: flex;
+  align-items: center;
 }
 
 [data-pov-shell] :where(button, [role="button"]):disabled {
@@ -104,9 +132,52 @@
   font-variant-numeric: tabular-nums;
 }
 
+[data-pov-shell] :where(h1, h2, h3) {
+  text-wrap: balance;
+}
+
+[data-pov-shell] :where(p, li, dd) {
+  overflow-wrap: anywhere;
+}
+
+[data-pov-shell] :where([aria-busy="true"]) {
+  cursor: progress;
+}
+
+[data-pov-shell] :where(.pov-skeleton) {
+  color: transparent !important;
+  border-color: transparent !important;
+  background:
+    linear-gradient(
+      100deg,
+      var(--pov-skeleton) 20%,
+      var(--pov-skeleton-highlight) 36%,
+      var(--pov-skeleton) 52%
+    );
+  background-size: 220% 100%;
+  animation: pov-skeleton-sweep 1.35s ease-in-out infinite;
+}
+
+[data-pov-shell] :where(.pov-visually-hidden) {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
 [data-pov-shell] :where(::selection) {
   background: rgba(0, 237, 100, .25);
   color: var(--pov-text);
+}
+
+@keyframes pov-skeleton-sweep {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
 }
 
 @media (hover: hover) and (pointer: fine) {
@@ -117,7 +188,8 @@
 
 @media (pointer: coarse) {
   [data-pov-shell] :where(button, [role="button"], input, select, textarea, summary) {
-    min-height: 44px;
+    min-height: 44px !important;
+    min-width: 44px;
   }
 }
 
@@ -133,6 +205,22 @@
         transparent
       );
   }
+
+  [data-pov-shell] :where(button, [role="button"], input, select, textarea, summary) {
+    min-width: 44px;
+    min-height: 44px !important;
+  }
+}
+
+@media (forced-colors: active) {
+  [data-pov-shell] :where(button, [role="button"], a, input, select, textarea, summary):focus-visible {
+    outline: 2px solid Highlight !important;
+    box-shadow: none;
+  }
+
+  [data-pov-shell]::before {
+    background: Highlight;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -146,4 +234,3 @@
     transition-duration: .01ms !important;
   }
 }
-
