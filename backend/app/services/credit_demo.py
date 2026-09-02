@@ -28,10 +28,22 @@ def invalidate_cache() -> None:
 
 def entry_points(limit: int = 6) -> dict[str, Any]:
     global _cache
+    # O lock cobre a checagem do cache E o cálculo inteiro, não só a checagem.
+    # Antes disso ele era liberado logo após ver `_cache is None`, e duas
+    # requisições concorrentes batendo no cache vazio (típico logo após
+    # `POST /api/demo/reset`) disparavam o cálculo caro em paralelo e
+    # redundante — exatamente no momento de maior carga no cluster. Mantendo o
+    # lock durante todo o cálculo, a segunda requisição espera a primeira
+    # terminar e reaproveita o resultado dela.
     with _lock:
         if _cache is not None:
             return _cache
+        result = _compute_entry_points(limit)
+        _cache = result
+        return result
 
+
+def _compute_entry_points(limit: int) -> dict[str, Any]:
     db = get_db()
     # A lista tem **um grupo por profundidade societária**, do mais raso ao mais
     # fundo. É isso que dá função ao controle de profundidade da tela: cada
@@ -88,17 +100,55 @@ def entry_points(limit: int = 6) -> dict[str, Any]:
         )
 
     # Controle: empresas sem participação societária de PJ, o caso comum.
-    controle = []
-    for doc in db.companies.find(
-        {"is_holding": {"$ne": True}, "situacao": "ATIVA"}, {"cnpj": 1, "razao_social": 1}
-    ).limit(400):
-        if db.ownership.count_documents({"owned_id": doc["_id"], "owner_type": "corporate"}, limit=1):
-            continue
-        controle.append({"company_id": doc["_id"], "cnpj": doc["cnpj"], "razao_social": doc["razao_social"]})
-        if len(controle) >= 3:
-            break
+    #
+    # Antes disto era um laço Python sobre até 400 empresas, cada uma disparando
+    # um `count_documents` separado em `ownership` só para descobrir se tinha
+    # dono corporativo — até 400 idas ao cluster no pior caso. Como o resultado
+    # é cacheado, o custo só reaparecia a cada `POST /api/demo/reset`, mas ali é
+    # exatamente onde o cluster já está sob carga de reconstrução do dataset.
+    #
+    # Uma única agregação com `$lookup` correlacionado resolve isso no servidor,
+    # no mesmo padrão de `app/db/ownership.py`: para cada candidata, verifica se
+    # existe alguma aresta em `ownership` com `owned_id` igual e `owner_type`
+    # corporate, e filtra por `$match` no resultado — uma ida ao cluster, não
+    # centenas.
+    controle = with_retry(
+        lambda: list(
+            db.companies.aggregate(
+                [
+                    {"$match": {"is_holding": {"$ne": True}, "situacao": "ATIVA"}},
+                    {"$limit": 400},
+                    {
+                        "$lookup": {
+                            "from": "ownership",
+                            "let": {"cid": "$_id"},
+                            "pipeline": [
+                                {
+                                    "$match": {
+                                        "$expr": {
+                                            "$and": [
+                                                {"$eq": ["$owned_id", "$$cid"]},
+                                                {"$eq": ["$owner_type", "corporate"]},
+                                            ]
+                                        }
+                                    }
+                                },
+                                {"$limit": 1},
+                            ],
+                            "as": "dono_corporativo",
+                        }
+                    },
+                    {"$match": {"dono_corporativo": {"$size": 0}}},
+                    {"$limit": 3},
+                    {"$project": {"cnpj": 1, "razao_social": 1}},
+                ]
+            )
+        ),
+        "companies (controle sem dono corporativo)",
+    )
+    controle = [
+        {"company_id": doc["_id"], "cnpj": doc["cnpj"], "razao_social": doc["razao_social"]}
+        for doc in controle
+    ]
 
-    result = {"applicants": solicitantes, "control": controle}
-    with _lock:
-        _cache = result
-    return result
+    return {"applicants": solicitantes, "control": controle}

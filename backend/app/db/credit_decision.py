@@ -58,27 +58,31 @@ def open_review(
     db = get_db()
     s = get_settings()
 
-    ja_aberto = db.companies.find_one(
-        {"_id": {"$in": company_ids}, "credit_status": FLAG, "case_id": {"$ne": None}},
-        {"case_id": 1},
-    )
-    if ja_aberto:
-        return {
-            "ok": False,
-            "case_id": ja_aberto["case_id"],
-            "already_open": True,
-            "error": (
-                f"já existe uma revisão de crédito aberta ({ja_aberto['case_id']}) cobrindo empresas "
-                "deste grupo; encerre-a antes de abrir outra"
-            ),
-            "elapsed_ms": 0.0,
-        }
-
     case_id = f"credit_{uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
     started = time.perf_counter()
 
+    # Sentinela para carregar o resultado da checagem "já aberto" para fora da
+    # transação sem depender do valor de retorno de `with_transaction` (que o
+    # pymongo pode reexecutar em caso de erro transiente, e não deve ser usado
+    # para decidir o que aconteceu fora da retry loop).
+    estado: dict[str, Any] = {}
+
     def txn(session) -> dict[str, Any]:
+        # A checagem de "já existe revisão aberta" precisa estar DENTRO da
+        # mesma transação/snapshot que a escrita: se ficar fora, duas
+        # requisições concorrentes passam ambas pela checagem antes de
+        # qualquer uma escrever `credit_status=under_review`, e a segunda
+        # sobrescreve o `case_id` da primeira sem que nenhuma veja erro.
+        ja_aberto = db.companies.find_one(
+            {"_id": {"$in": company_ids}, "credit_status": FLAG, "case_id": {"$ne": None}},
+            {"case_id": 1},
+            session=session,
+        )
+        if ja_aberto:
+            estado["already_open"] = ja_aberto["case_id"]
+            return {}
+
         empresas = db.companies.update_many(
             {"_id": {"$in": company_ids}},
             {"$set": {"credit_status": FLAG, "case_id": case_id, "reviewed_at": now}},
@@ -124,6 +128,18 @@ def open_review(
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
             }
 
+    if "already_open" in estado:
+        return {
+            "ok": False,
+            "case_id": estado["already_open"],
+            "already_open": True,
+            "error": (
+                f"já existe uma revisão de crédito aberta ({estado['already_open']}) cobrindo empresas "
+                "deste grupo; encerre-a antes de abrir outra"
+            ),
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
+
     return {
         "ok": True,
         "case_id": case_id,
@@ -157,8 +173,16 @@ def close_review(case_id: str) -> dict[str, Any]:
                 {"_id": case_id}, {"$set": {"status": "closed"}}, session=s_
             )
 
-        session.with_transaction(txn, write_concern=WriteConcern("majority"))
+        session.with_transaction(
+            txn,
+            read_concern=ReadConcern("snapshot"),
+            write_concern=WriteConcern("majority"),
+            read_preference=ReadPreference.PRIMARY,
+        )
     return {"ok": True, "case_id": case_id}
+
+
+CASE_DETAIL_LIMIT = 200
 
 
 def case_detail(case_id: str) -> dict[str, Any]:
@@ -166,16 +190,21 @@ def case_detail(case_id: str) -> dict[str, Any]:
     caso = db.credit_decisions.find_one({"_id": case_id})
     if not caso:
         return {"ok": False, "error": "caso não encontrado"}
+    total = db.companies.count_documents({"case_id": case_id})
     empresas = list(
         db.companies.find(
             {"case_id": case_id},
             {"razao_social": 1, "cnpj": 1, "credit_status": 1, "is_holding": 1},
-        ).limit(200)
+        ).limit(CASE_DETAIL_LIMIT)
     )
     return {
         "ok": True,
         "case": {**caso, "opened_at": caso["opened_at"].isoformat()},
         "companies": [{**c, "status_before": "active"} for c in empresas],
+        "stats": {
+            "total": total,
+            "truncated": total > CASE_DETAIL_LIMIT,
+        },
     }
 
 

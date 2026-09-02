@@ -48,6 +48,9 @@ const specs = [
   // leitura nenhuma. Vinham do modelo anterior desta POV, em que o atributo
   // compartilhado era a própria aresta.
   ["people", { seed_index: 1 }, {}, "seleção determinística"],
+
+  // --- alertas de ownership (change stream) ---
+  ["ownership_alerts", { created_at: -1 }, {}, "GET /api/alerts/recent ordena pelo mais novo"],
 ];
 
 for (const [coll, keys, opts, why] of specs) {
